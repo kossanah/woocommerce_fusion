@@ -19,11 +19,6 @@ This app allows you to synchronise your ERPNext site with **multiple** WooCommer
 
 User documentation is hosted at [woocommerce-fusion-docs.finfoot.tech](https://woocommerce-fusion-docs.finfoot.tech)
 
-
-### License
-
-Dirk van der Laarse
-
 ### Manual Installation
 
 1. [Install bench](https://github.com/frappe/bench).
@@ -91,3 +86,9 @@ Make sure you have [mdbook](https://rust-lang.github.io/mdBook/guide/installatio
 cd docs
 mdbook serve --open
 ```
+
+### License
+
+GNU GPL V3
+
+The code is licensed as GNU General Public License (v3) and the copyright is owned by Finfoot Tech (Pty) Ltd and Contributors.
