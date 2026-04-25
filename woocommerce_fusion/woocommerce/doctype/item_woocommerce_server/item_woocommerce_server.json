@@ -10,7 +10,9 @@
   "woocommerce_id",
   "woocommerce_server",
   "view_product",
-  "woocommerce_last_sync_hash"
+  "woocommerce_last_sync_hash",
+  "woocommerce_image_id",
+  "woocommerce_last_image_url"
  ],
  "fields": [
   {
@@ -45,6 +47,21 @@
    "fieldtype": "Data",
    "label": "Last Sync Hash",
    "read_only": 1
+  },
+  {
+   "fieldname": "woocommerce_image_id",
+   "fieldtype": "Data",
+   "label": "WooCommerce Image ID",
+   "read_only": 1,
+   "description": "WooCommerce Media Library attachment ID for the currently synced image"
+  },
+  {
+   "fieldname": "woocommerce_last_image_url",
+   "fieldtype": "Data",
+   "label": "Last Synced Image URL",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "ERPNext image URL that was last successfully uploaded to WooCommerce (used to detect changes)"
   }
  ],
  "index_web_pages_for_search": 1,

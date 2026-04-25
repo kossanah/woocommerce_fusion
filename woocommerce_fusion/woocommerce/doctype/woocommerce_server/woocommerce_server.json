@@ -68,6 +68,7 @@
   "item_section",
   "name_by",
   "enable_image_sync",
+  "enable_erpnext_to_wc_image_upload",
   "item_stock_section",
   "enable_stock_level_synchronisation",
   "warehouses",
@@ -501,7 +502,14 @@
    "description": "Set the WooCommerce Product's first image's URL as the Image for the ERPNext Item",
    "fieldname": "enable_image_sync",
    "fieldtype": "Check",
-   "label": "Enable Image Sync"
+   "label": "Enable Image Sync (WooCommerce → ERPNext)"
+  },
+  {
+   "default": "0",
+   "description": "Upload the ERPNext Item image to the WooCommerce Media Library and set it as the product image. Requires the WooCommerce Media API plugin on WordPress.",
+   "fieldname": "enable_erpnext_to_wc_image_upload",
+   "fieldtype": "Check",
+   "label": "Enable Image Upload (ERPNext → WooCommerce)"
   },
   {
    "fieldname": "customers_sync_section",

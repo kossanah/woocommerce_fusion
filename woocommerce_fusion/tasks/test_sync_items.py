@@ -14,7 +14,8 @@ from woocommerce_fusion.woocommerce.woocommerce_api import (
 class TestWooCommerceSync(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
-		super().setUpClass()  # important to call super() methods when extending TestCase.
+		# important to call super() methods when extending TestCase.
+		super().setUpClass()
 
 	@patch.object(SynchroniseItem, "update_item")
 	def test_sync_items_while_passing_item_should_update_item_if_item_is_older(
@@ -379,3 +380,195 @@ class TestWooCommerceSync(FrappeTestCase):
 
 		self.assertEqual(wc_product_mock.type, "variable")
 		item_mock.item.save.assert_called_once()
+
+
+@patch("woocommerce_fusion.tasks.sync_items.frappe")
+class TestImageSyncToWooCommerce(FrappeTestCase):
+	"""
+	Tests for the ERPNext → WooCommerce image upload feature.
+	Key invariant: no upload should be triggered when the image URL is unchanged.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+
+	def _make_sync(self, wc_product, item):
+		"""Helper: return a SynchroniseItem with item and woocommerce_product set."""
+		sync = SynchroniseItem.__new__(SynchroniseItem)
+		sync.item = item
+		sync.woocommerce_product = wc_product
+		sync.settings = Mock()
+		return sync
+
+	def _make_item(self, image="/files/product.jpg", last_image_url=None, image_id=None):
+		item_wc_server = Mock()
+		item_wc_server.get = lambda key, default=None: {
+			"woocommerce_last_image_url": last_image_url,
+			"woocommerce_image_id": image_id,
+			"name": "Item WooCommerce Server-001",
+		}.get(key, default)
+
+		item = Mock()
+		item.image = image
+		item.item_name = "Test Product"
+
+		item_mock = Mock()
+		item_mock.item = item
+		item_mock.item_woocommerce_server = item_wc_server
+		return item_mock
+
+	def _make_wc_product(self, server="site.example.com", wc_id=42):
+		wc_product = Mock()
+		wc_product.woocommerce_server = server
+		wc_product.woocommerce_id = wc_id
+		return wc_product
+
+	def test_no_upload_when_image_url_unchanged(self, mock_frappe):
+		"""
+		When the ERPNext item image URL matches woocommerce_last_image_url,
+		_sync_item_image_to_woocommerce must return False and make no API calls.
+		"""
+		image_url = "https://site.example.com/files/product.jpg"
+
+		wc_server = Mock()
+		wc_server.enable_erpnext_to_wc_image_upload = True
+		mock_frappe.get_cached_doc.return_value = wc_server
+		mock_frappe.db.get_value.return_value = (
+			"product.jpg",
+			"/files/product.jpg",
+			0,  # is_private=0
+			"abc123",
+			None,
+		)
+		mock_frappe.utils.get_url.return_value = "https://site.example.com"
+
+		item = self._make_item(
+			image="/files/product.jpg",
+			last_image_url=image_url,  # same URL as what will be constructed
+		)
+		wc_product = self._make_wc_product()
+		sync = self._make_sync(wc_product, item)
+
+		result = sync._sync_item_image_to_woocommerce(wc_product, item)
+
+		self.assertFalse(result)
+
+	@patch.object(SynchroniseItem, "handle_media_update")
+	def test_upload_triggered_when_image_url_changed(self, mock_handle_media, mock_frappe):
+		"""
+		When the item image URL differs from woocommerce_last_image_url,
+		handle_media_update must be called and _sync_item_image_to_woocommerce returns True.
+		"""
+		wc_server = Mock()
+		wc_server.enable_erpnext_to_wc_image_upload = True
+		mock_frappe.get_cached_doc.return_value = wc_server
+		mock_frappe.db.get_value.return_value = (
+			"product-new.jpg",
+			"/files/product-new.jpg",
+			0,
+			"def456",
+			None,
+		)
+		mock_frappe.utils.get_url.return_value = "https://site.example.com"
+		mock_frappe.db.set_value = Mock()
+
+		mock_handle_media.return_value = {
+			"id": "99",
+			"src": "https://site.example.com/wp-content/uploads/product-new.jpg",
+			"name": "product-new.jpg",
+			"alt": "Test Product",
+		}
+
+		item = self._make_item(
+			image="/files/product-new.jpg",
+			last_image_url="https://site.example.com/files/product-old.jpg",  # old URL
+			image_id="55",
+		)
+		wc_product = self._make_wc_product()
+		sync = self._make_sync(wc_product, item)
+
+		result = sync._sync_item_image_to_woocommerce(wc_product, item)
+
+		self.assertTrue(result)
+		mock_handle_media.assert_called_once()
+		# Verify old image ID was passed for deletion
+		call_kwargs = mock_handle_media.call_args.kwargs
+		self.assertEqual(call_kwargs["old_image_id"], "55")
+
+	@patch.object(SynchroniseItem, "handle_media_update")
+	def test_image_id_and_url_saved_after_upload(self, mock_handle_media, mock_frappe):
+		"""
+		After a successful upload, woocommerce_image_id and woocommerce_last_image_url
+		must be persisted via frappe.db.set_value.
+		"""
+		wc_server = Mock()
+		wc_server.enable_erpnext_to_wc_image_upload = True
+		mock_frappe.get_cached_doc.return_value = wc_server
+		mock_frappe.db.get_value.return_value = (
+			"img.jpg",
+			"/files/img.jpg",
+			0,
+			"hash",
+			None,
+		)
+		mock_frappe.utils.get_url.return_value = "https://site.example.com"
+		mock_frappe.db.set_value = Mock()
+
+		mock_handle_media.return_value = {
+			"id": "77",
+			"src": "https://site.example.com/wp-content/uploads/img.jpg",
+			"name": "img.jpg",
+			"alt": "Test Product",
+		}
+
+		item = self._make_item(image="/files/img.jpg", last_image_url=None)
+		wc_product = self._make_wc_product()
+		sync = self._make_sync(wc_product, item)
+
+		sync._sync_item_image_to_woocommerce(wc_product, item)
+
+		mock_frappe.db.set_value.assert_called_once()
+		call_args = mock_frappe.db.set_value.call_args
+		saved_values = call_args.args[2] if len(call_args.args) > 2 else call_args.kwargs.get("value")
+		self.assertEqual(saved_values["woocommerce_image_id"], "77")
+		self.assertEqual(
+			saved_values["woocommerce_last_image_url"],
+			"https://site.example.com/files/img.jpg",
+		)
+
+	@patch.object(SynchroniseItem, "handle_media_update")
+	def test_no_upload_when_feature_disabled(self, mock_handle_media, mock_frappe):
+		"""
+		When enable_erpnext_to_wc_image_upload is False, no upload should occur.
+		"""
+		wc_server = Mock()
+		wc_server.enable_erpnext_to_wc_image_upload = False
+		mock_frappe.get_cached_doc.return_value = wc_server
+
+		item = self._make_item(image="/files/product.jpg")
+		wc_product = self._make_wc_product()
+		sync = self._make_sync(wc_product, item)
+
+		result = sync._sync_item_image_to_woocommerce(wc_product, item)
+
+		self.assertFalse(result)
+		mock_handle_media.assert_not_called()
+
+	@patch.object(SynchroniseItem, "handle_media_update")
+	def test_no_upload_when_item_has_no_image(self, mock_handle_media, mock_frappe):
+		"""
+		When the ERPNext item has no image, no upload should occur.
+		"""
+		wc_server = Mock()
+		wc_server.enable_erpnext_to_wc_image_upload = True
+		mock_frappe.get_cached_doc.return_value = wc_server
+
+		item = self._make_item(image=None)
+		wc_product = self._make_wc_product()
+		sync = self._make_sync(wc_product, item)
+
+		result = sync._sync_item_image_to_woocommerce(wc_product, item)
+
+		self.assertFalse(result)
+		mock_handle_media.assert_not_called()

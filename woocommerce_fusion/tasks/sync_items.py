@@ -12,6 +12,7 @@ from jsonpath_ng.ext import parse
 
 from woocommerce_fusion.exceptions import SyncDisabledError
 from woocommerce_fusion.tasks.sync import SynchroniseWooCommerce
+from woocommerce_fusion.tasks.utils import APIWithRequestLogging
 from woocommerce_fusion.woocommerce.doctype.woocommerce_product.woocommerce_product import (
 	WooCommerceProduct,
 )
@@ -124,6 +125,25 @@ def sync_woocommerce_products_modified_since(date_time_from=None):
 			pass
 
 	frappe.db.set_single_value("WooCommerce Settings", "wc_last_sync_date_items", now())
+
+
+def format_erpnext_img_url(image_details) -> Optional[str]:
+	"""
+	Return a publicly accessible URL for an ERPNext file, or None if the file is private
+	or unavailable.
+
+	image_details is a tuple/list from frappe.db.get_value with fields:
+	  [0] file_name, [1] file_url, [2] is_private, [3] content_hash, [4] modified
+	"""
+	if image_details[2] == 0:  # is_private == 0 means the file is publicly accessible
+		file_url = image_details[1]
+		if file_url:
+			if file_url.startswith("/"):
+				# Relative URL — prepend the site URL
+				site_url = frappe.utils.get_url()
+				return f"{site_url.rstrip('/')}{file_url}"
+			return file_url
+	return None
 
 
 @dataclass
@@ -301,6 +321,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if product_fields_changed:
 			wc_product_dirty = True
 
+		# Image upload: ERPNext → WooCommerce
+		image_dirty = self._sync_item_image_to_woocommerce(wc_product, item)
+		if image_dirty:
+			wc_product_dirty = True
+
 		if wc_product_dirty:
 			wc_product.save()
 
@@ -375,6 +400,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			item.item_woocommerce_server.woocommerce_id = wc_product.woocommerce_id
 			item.item.flags.created_by_sync = True
 			item.item.save()
+
+			# Upload image to WooCommerce after product is created (woocommerce_id is now available)
+			if self._sync_item_image_to_woocommerce(wc_product, item):
+				wc_product.save()
 
 			self.set_sync_hash()
 
@@ -567,6 +596,141 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					)
 
 		return wc_product_dirty, woocommerce_product
+
+	def _sync_item_image_to_woocommerce(
+		self, wc_product: WooCommerceProduct, item: ERPNextItemToSync
+	) -> bool:
+		"""
+		Upload or update the ERPNext Item image to WooCommerce via the woo-media-api plugin.
+
+		Returns True if the WooCommerce product's images field was updated (caller should save).
+
+		Duplicate-prevention strategy:
+		  - Track the last uploaded ERPNext image URL in Item WooCommerce Server.woocommerce_last_image_url
+		  - Skip the upload entirely when the URL is unchanged → no duplicate Media Library entry
+		  - When the image changes, upload the new image, then delete the old WooCommerce media entry
+		"""
+		wc_server = frappe.get_cached_doc("WooCommerce Server", wc_product.woocommerce_server)
+
+		if not wc_server.enable_erpnext_to_wc_image_upload:
+			return False
+
+		if not item.item.image:
+			return False
+
+		image_details = frappe.db.get_value(
+			"File",
+			{"file_url": item.item.image},
+			["file_name", "file_url", "is_private", "content_hash", "modified"],
+		)
+		if not image_details:
+			return False
+
+		image_url = format_erpnext_img_url(image_details)
+		if not image_url:
+			return False
+
+		# Check if this image URL was already successfully uploaded — if so, skip to avoid duplicates
+		last_image_url = item.item_woocommerce_server.get("woocommerce_last_image_url")
+		if last_image_url and last_image_url == image_url:
+			return False
+
+		# Image has changed (or was never uploaded) — upload it now
+		old_image_id = item.item_woocommerce_server.get("woocommerce_image_id") or None
+		media_response = self.handle_media_update(
+			wc_server=wc_server,
+			wc_product=wc_product,
+			image_url=image_url,
+			title=image_details[0],
+			alt_text=item.item.item_name,
+			old_image_id=old_image_id,
+		)
+
+		if not media_response or not media_response.get("id"):
+			return False
+
+		# Update product images array with the new media entry
+		wc_product.images = json.dumps(
+			[
+				{
+					"id": media_response["id"],
+					"src": media_response.get("src", ""),
+					"name": media_response.get("name", image_details[0]),
+					"alt": media_response.get("alt", item.item.item_name),
+				}
+			]
+		)
+
+		# Persist the uploaded image ID and URL so future syncs can skip re-upload
+		frappe.db.set_value(
+			"Item WooCommerce Server",
+			item.item_woocommerce_server.name,
+			{
+				"woocommerce_image_id": str(media_response["id"]),
+				"woocommerce_last_image_url": image_url,
+			},
+			update_modified=False,
+		)
+
+		return True
+
+	def handle_media_update(
+		self,
+		wc_server,
+		wc_product: WooCommerceProduct,
+		image_url: str,
+		title: str,
+		alt_text: str,
+		old_image_id: Optional[str] = None,
+	) -> Optional[dict]:
+		"""
+		Upload a new image to the WooCommerce Media Library via the woo-media-api plugin,
+		optionally deleting the previously uploaded image to keep the library clean.
+
+		Returns a normalised dict with keys: id, src, name, alt — or None on failure.
+		"""
+		wc_api = APIWithRequestLogging(
+			url=wc_server.woocommerce_server_url,
+			consumer_key=wc_server.api_consumer_key,
+			consumer_secret=wc_server.api_consumer_secret,
+			version="wc/v3",
+			timeout=40,
+		)
+
+		media_data = {
+			"image_url": image_url,
+			"title": title,
+			"alt_text": alt_text,
+			"post": wc_product.woocommerce_id,
+		}
+
+		try:
+			response = wc_api.post("media", data=media_data)
+			response.raise_for_status()
+			media_response = response.json()
+
+			# Delete old media entry *after* new one is confirmed, keeping library clean
+			if old_image_id:
+				try:
+					wc_api.delete(f"media/{old_image_id}")
+				except Exception:
+					# Non-fatal: log but continue — the new image was already uploaded
+					frappe.log_error(
+						f"WooCommerce Media: failed to delete old media ID {old_image_id}",
+						title="WooCommerce Media Cleanup",
+					)
+
+			return {
+				"id": str(media_response["ID"]),
+				"src": media_response.get("guid", image_url),
+				"name": media_response.get("post_title", title),
+				"alt": media_response.get("post_excerpt") or alt_text,
+			}
+
+		except Exception:
+			error_message = f"{frappe.get_traceback()}\n\nMedia upload data:\n{str(media_data)}"
+			frappe.log_error("WooCommerce Media Upload Error", error_message)
+			return None
 
 	def set_sync_hash(self):
 		"""
