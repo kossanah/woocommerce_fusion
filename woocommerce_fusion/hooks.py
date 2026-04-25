@@ -167,8 +167,9 @@ before_tests = "woocommerce_fusion.setup.utils.before_tests"
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# }
+override_whitelisted_methods = {
+	"frappe.desk.listview.get_list_settings": "woocommerce_fusion.overrides.listview.get_list_settings"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
