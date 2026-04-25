@@ -5,3 +5,6 @@
 tags
 woocommerce_fusion/docs/current
 node_modules/
+woocommerce_fusion/tasks/sync_item_prices.py.bk
+woocommerce_fusion/tasks/sync_items-old.py
+scripts/
