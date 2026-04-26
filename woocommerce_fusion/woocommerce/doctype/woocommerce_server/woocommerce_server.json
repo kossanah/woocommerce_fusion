@@ -69,6 +69,7 @@
   "name_by",
   "enable_image_sync",
   "enable_erpnext_to_wc_image_upload",
+  "new_product_publish_status",
   "item_stock_section",
   "enable_stock_level_synchronisation",
   "warehouses",
@@ -510,6 +511,14 @@
    "fieldname": "enable_erpnext_to_wc_image_upload",
    "fieldtype": "Check",
    "label": "Enable Image Upload (ERPNext → WooCommerce)"
+  },
+  {
+   "default": "draft",
+   "description": "Status assigned to newly created WooCommerce products during sync. Set to 'publish' to make them immediately visible in the store.",
+   "fieldname": "new_product_publish_status",
+   "fieldtype": "Select",
+   "label": "New Product Status",
+   "options": "draft\npublish"
   },
   {
    "fieldname": "customers_sync_section",

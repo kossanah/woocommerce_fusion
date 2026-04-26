@@ -390,6 +390,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product.woocommerce_name = item.item.item_name
 			wc_product.regular_price = get_item_price_rate(item) or "0"
 
+			wc_server = frappe.get_cached_doc(
+				"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
+			)
+			wc_product.status = wc_server.new_product_publish_status or "draft"
+
 			self.set_product_fields(wc_product, item)
 
 			wc_product.insert()
