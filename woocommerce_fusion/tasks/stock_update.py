@@ -7,6 +7,37 @@ from woocommerce_fusion.tasks.utils import APIWithRequestLogging
 verify_ssl = not frappe._dev_server
 
 
+def _get_parent_woocommerce_id(item, woocommerce_server, variation_woocommerce_id):
+	"""
+	Get the WooCommerce parent product ID for a variation item.
+
+	Priority:
+	1) WooCommerce Product doc's parent_id for this variation/server
+	2) Parent ERPNext Item's linked WooCommerce ID on this server
+	"""
+	parent_ids = []
+
+	# 1) Resolve from WooCommerce Product record (most direct mapping)
+	wc_product_parent_id = frappe.db.get_value(
+		"WooCommerce Product",
+		{"woocommerce_server": woocommerce_server, "woocommerce_id": variation_woocommerce_id},
+		"parent_id",
+	)
+	if wc_product_parent_id:
+		parent_ids.append(str(wc_product_parent_id))
+
+	# 2) Fallback from ERPNext parent item's mapping
+	if item.variant_of:
+		parent_item = frappe.get_doc("Item", item.variant_of)
+		for parent_wc_site in parent_item.woocommerce_servers:
+			if parent_wc_site.woocommerce_server == woocommerce_server and parent_wc_site.woocommerce_id:
+				parent_ids.append(str(parent_wc_site.woocommerce_id))
+				break
+
+	# Preserve order while deduplicating
+	return list(dict.fromkeys(parent_ids))
+
+
 def update_stock_levels_for_woocommerce_item(doc, method):
 	if not frappe.flags.in_test:
 		if doc.doctype in ("Stock Entry", "Stock Reconciliation", "Sales Invoice", "Delivery Note"):
@@ -114,20 +145,46 @@ def update_stock_levels_on_woocommerce_site(item_code):
 				}
 
 				try:
-					parent_item_id = item.variant_of
-					if parent_item_id:
-						parent_item = frappe.get_doc("Item", parent_item_id)
-						# Get the parent item's woocommerce_id
-						for parent_wc_site in parent_item.woocommerce_servers:
-							if parent_wc_site.woocommerce_server == woocommerce_server:
-								parent_woocommerce_id = parent_wc_site.woocommerce_id
+					if item.variant_of:
+						# Variations require parent product ID in the endpoint path.
+						parent_ids = _get_parent_woocommerce_id(item, woocommerce_server, woocommerce_id)
+						if not parent_ids:
+							parent_ids = []
+
+						response = None
+						attempted_endpoints = []
+						for parent_woocommerce_id in parent_ids:
+							endpoint = f"products/{parent_woocommerce_id}/variations/{woocommerce_id}"
+							attempted_endpoints.append(endpoint)
+							response = wc_api.put(endpoint=endpoint, data=data_to_post)
+							if response.status_code == 200:
 								break
-						if not parent_woocommerce_id:
+
+						# Safety fallback: some sites store the item as non-variation even if ERPNext has variant_of set.
+						if response is None or response.status_code != 200:
+							endpoint = f"products/{woocommerce_id}"
+							attempted_endpoints.append(endpoint)
+							response = wc_api.put(endpoint=endpoint, data=data_to_post)
+
+						if response is None:
 							continue
-						endpoint = f"products/{parent_woocommerce_id}/variations/{woocommerce_id}"
+
+						if response.status_code != 200:
+							error_message = (
+								f"Status Code not 200\n\nData in PUT request: \n{str(data_to_post)}"
+								f"\n\nAttempted Endpoints: {attempted_endpoints}"
+							)
+							error_message += (
+								f"\n\nResponse: \n{response.status_code}\nResponse Text: {response.text}"
+								f"\nRequest URL: {response.request.url}\nRequest Body: {response.request.body}"
+								if response is not None
+								else ""
+							)
+							frappe.log_error("WooCommerce Error", error_message)
+							raise ValueError(error_message)
 					else:
 						endpoint = f"products/{woocommerce_id}"
-					response = wc_api.put(endpoint=endpoint, data=data_to_post)
+						response = wc_api.put(endpoint=endpoint, data=data_to_post)
 				except Exception as err:
 					error_message = f"{frappe.get_traceback()}\n\nData in PUT request: \n{str(data_to_post)}"
 					frappe.log_error("WooCommerce Error", error_message)
