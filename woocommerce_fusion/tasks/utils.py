@@ -1,3 +1,4 @@
+import time
 import traceback
 
 import frappe
@@ -12,33 +13,45 @@ class APIWithRequestLogging(API):
 	def _API__request(self, method, endpoint, data, params=None, **kwargs):
 		"""Override _request method to also create a 'WooCommerce Request Log'"""
 		result = None
-		try:
-			result = super()._API__request(method, endpoint, data, params, **kwargs)
-			if not frappe.flags.in_test and is_woocommerce_request_logging_enabled(self.url):
-				frappe.enqueue(
-					"woocommerce_fusion.tasks.utils.log_woocommerce_request",
-					url=self.url,
-					endpoint=endpoint,
-					request_method=method,
-					params=params,
-					data=data,
-					res=result,
-					traceback="".join(traceback.format_stack(limit=8)),
-				)
-			return result
-		except Exception as e:
-			if not frappe.flags.in_test and is_woocommerce_request_logging_enabled(self.url):
-				frappe.enqueue(
-					"woocommerce_fusion.tasks.utils.log_woocommerce_request",
-					url=self.url,
-					endpoint=endpoint,
-					request_method=method,
-					params=params,
-					data=data,
-					res=result,
-					traceback="".join(traceback.format_stack(limit=8)),
-				)
-			raise e
+		max_attempts = 3
+		for attempt in range(max_attempts):
+			try:
+				result = super()._API__request(method, endpoint, data, params, **kwargs)
+				if result is not None and result.status_code == 429:
+					retry_after = int(result.headers.get("Retry-After", 5 * (2 ** attempt)))
+					frappe.logger().warning(
+						f"WooCommerce API returned 429 Too Many Requests (endpoint: {endpoint}). "
+						f"Sleeping for {retry_after} seconds before retry (attempt {attempt + 1}/{max_attempts})."
+					)
+					time.sleep(retry_after)
+					continue
+				break
+			except Exception as e:
+				if not frappe.flags.in_test and is_woocommerce_request_logging_enabled(self.url):
+					frappe.enqueue(
+						"woocommerce_fusion.tasks.utils.log_woocommerce_request",
+						url=self.url,
+						endpoint=endpoint,
+						request_method=method,
+						params=params,
+						data=data,
+						res=result,
+						traceback="".join(traceback.format_stack(limit=8)),
+					)
+				raise e
+
+		if not frappe.flags.in_test and is_woocommerce_request_logging_enabled(self.url):
+			frappe.enqueue(
+				"woocommerce_fusion.tasks.utils.log_woocommerce_request",
+				url=self.url,
+				endpoint=endpoint,
+				request_method=method,
+				params=params,
+				data=data,
+				res=result,
+				traceback="".join(traceback.format_stack(limit=8)),
+			)
+		return result
 
 
 @redis_cache(ttl=86400)

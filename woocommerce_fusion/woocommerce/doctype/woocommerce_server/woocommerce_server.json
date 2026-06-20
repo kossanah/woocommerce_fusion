@@ -57,6 +57,9 @@
   "enable_so_status_sync",
   "enable_so_status_sync_warning_html",
   "sales_order_status_map",
+  "so_order_status_filtering_section",
+  "sync_only_specific_order_statuses",
+  "whitelisted_order_statuses",
   "order_item_line_fields_section",
   "order_item_fields_warning_html",
   "order_line_item_field_map",
@@ -497,6 +500,27 @@
    "depends_on": "eval: doc.enable_so_status_sync",
    "fieldname": "enable_so_status_sync_warning_html",
    "fieldtype": "HTML"
+  },
+  {
+   "fieldname": "so_order_status_filtering_section",
+   "fieldtype": "Section Break",
+   "label": "Order Status Filtering"
+  },
+  {
+   "default": "0",
+   "description": "When enabled, only WooCommerce orders with specific statuses will be synced to ERPNext. This prevents junk or incomplete orders from entering your system.",
+   "documentation_url": "https://woocommerce-fusion-docs.finfoot.tech/features/sales-order.html#order-status-filtering",
+   "fieldname": "sync_only_specific_order_statuses",
+   "fieldtype": "Check",
+   "label": "Sync Only Specific Order Statuses"
+  },
+  {
+   "depends_on": "eval: doc.sync_only_specific_order_statuses",
+   "description": "Select which WooCommerce order statuses should be synced to ERPNext. Orders with other statuses will be filtered out.",
+   "fieldname": "whitelisted_order_statuses",
+   "fieldtype": "Table",
+   "label": "Whitelisted Order Statuses",
+   "options": "WooCommerce Server Whitelisted Order Status"
   },
   {
    "default": "0",

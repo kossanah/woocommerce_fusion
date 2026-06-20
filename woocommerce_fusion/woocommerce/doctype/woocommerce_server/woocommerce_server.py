@@ -150,6 +150,19 @@ class WooCommerceServer(Document):
 		"""
 		return [key for key in WC_ORDER_STATUS_MAPPING.keys()]
 
+	@frappe.whitelist()
+	def get_whitelisted_order_statuses(self) -> List[str]:
+		"""
+		Retrieve list of whitelisted WooCommerce Order Statuses for syncing.
+		Returns list of status names (e.g., ["Processing", "Shipped"])
+		
+		If filtering is disabled, returns None (meaning all statuses should be synced).
+		"""
+		if not self.sync_only_specific_order_statuses:
+			return None
+		
+		return [row.order_status for row in self.whitelisted_order_statuses]
+
 
 @frappe.whitelist()
 def get_woocommerce_shipment_providers(woocommerce_server):

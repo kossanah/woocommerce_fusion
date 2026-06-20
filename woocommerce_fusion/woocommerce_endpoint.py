@@ -42,6 +42,7 @@ def validate_request() -> Tuple[bool, Optional[HTTPStatus], Optional[str]]:
 def order_created(*args, **kwargs):
 	"""
 	Accepts payload data from WooCommerce "Order Created" webhook
+	Applies status filtering based on WooCommerce Server configuration
 	"""
 	valid, status, msg = validate_request()
 	if not valid:
@@ -59,9 +60,27 @@ def order_created(*args, **kwargs):
 
 	if event == "created":
 		webhook_source_url = frappe.get_request_header("x-wc-webhook-source", "")
-		woocommerce_order_name = (
-			f"{parse_domain_from_url(webhook_source_url)}{WC_RESOURCE_DELIMITER}{order['id']}"
-		)
+		wc_server_name = parse_domain_from_url(webhook_source_url)
+		woocommerce_order_name = f"{wc_server_name}{WC_RESOURCE_DELIMITER}{order['id']}"
+		
+		# Check if this order should be synced based on status filtering
+		try:
+			wc_server = frappe.get_cached_doc("WooCommerce Server", wc_server_name)
+			whitelisted_statuses = wc_server.get_whitelisted_order_statuses()
+			
+			# If status filtering is enabled, check if order status is whitelisted
+			if whitelisted_statuses is not None:
+				order_status = order.get("status")
+				if order_status not in whitelisted_statuses:
+					frappe.logger().debug(
+						f"WooCommerce Order {woocommerce_order_name} webhook filtered out: "
+						f"status '{order_status}' not in whitelist {whitelisted_statuses}"
+					)
+					return Response(status=HTTPStatus.OK)  # Return OK to prevent webhook retry
+		except Exception as e:
+			frappe.logger().warning(f"Error checking order status filter: {e}")
+			# Continue with sync if there's an error (fail-open approach)
+		
 		frappe.enqueue(run_sales_order_sync, queue="long", woocommerce_order_name=woocommerce_order_name)
 		return Response(status=HTTPStatus.OK)
 	else:

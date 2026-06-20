@@ -85,6 +85,7 @@ def run_sales_order_sync(
 def sync_woocommerce_orders_modified_since(date_time_from=None):
 	"""
 	Get list of WooCommerce orders modified since date_time_from
+	Applies status filtering based on WooCommerce Server configuration
 	"""
 	wc_settings = frappe.get_doc("WooCommerce Integration Settings")
 
@@ -104,7 +105,33 @@ def sync_woocommerce_orders_modified_since(date_time_from=None):
 
 	wc_orders = get_list_of_wc_orders(date_time_from=date_time_from)
 	wc_orders += get_list_of_wc_orders(date_time_from=date_time_from, status="trash")
+	
+	# Filter orders by whitelisted statuses if enabled
+	filtered_wc_orders = []
+	wc_servers = {server.name: server for server in SynchroniseWooCommerce().servers}
+	
 	for wc_order in wc_orders:
+		# Get the WooCommerce server for this order
+		# The WooCommerce Order name format includes the server domain
+		wc_server_name = wc_order.name.split("~")[0] if "~" in wc_order.name else None
+		
+		if wc_server_name and wc_server_name in wc_servers:
+			wc_server = wc_servers[wc_server_name]
+			whitelisted_statuses = wc_server.get_whitelisted_order_statuses()
+			
+			# If status filtering is disabled (None) or order status is in whitelist, include it
+			if whitelisted_statuses is None or wc_order.status in whitelisted_statuses:
+				filtered_wc_orders.append(wc_order)
+				# Log filtered-out orders if status filtering is enabled
+			elif whitelisted_statuses is not None:
+				frappe.logger().debug(
+					f"WooCommerce Order {wc_order.name} filtered out: status '{wc_order.status}' not in whitelist {whitelisted_statuses}"
+				)
+		else:
+			# If we can't determine the server, include the order (backward compatibility)
+			filtered_wc_orders.append(wc_order)
+	
+	for wc_order in filtered_wc_orders:
 		try:
 			run_sales_order_sync(woocommerce_order=wc_order, enqueue=True)
 		# Skip orders with errors, as these exceptions will be logged

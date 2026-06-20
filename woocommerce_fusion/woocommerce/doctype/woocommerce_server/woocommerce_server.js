@@ -77,8 +77,10 @@ frappe.ui.form.on('WooCommerce Server', {
 			frm.trigger('get_woocommerce_order_status_list');
 		}
 
-		// Set Options field for 'Sales Order Status Sync' section
-		warningHTML = `
+	// Set up order status filtering UI
+	if (frm.doc.sync_only_specific_order_statuses && !frm.fields_dict.whitelisted_order_statuses.grid.get_docfield("order_status").options) {
+		frm.trigger('get_order_status_filter_list');
+	}
 			<div class="form-message red">
 				<div>
 					${__("This setting is Experimental. Monitor your Error Log after enabling this setting")}
@@ -94,6 +96,12 @@ frappe.ui.form.on('WooCommerce Server', {
 			frm.trigger('get_woocommerce_order_status_list');
 		}
 	},
+	// Handle click of 'Sync Only Specific Order Statuses'
+	sync_only_specific_order_statuses: function(frm){
+		if (frm.doc.sync_only_specific_order_statuses && !frm.fields_dict.whitelisted_order_statuses.grid.get_docfield("order_status").options){
+			frm.trigger('get_order_status_filter_list');
+		}
+	},
 	// Retrieve WooCommerce order statuses
 	get_woocommerce_order_status_list: function(frm){
 		frappe.call({
@@ -106,6 +114,24 @@ frappe.ui.form.on('WooCommerce Server', {
 				// Set the Options property
 				frm.fields_dict.sales_order_status_map.grid.update_docfield_property(
 					"woocommerce_sales_order_status",
+					"options",
+					options
+				);
+			}
+		});
+	},
+	// Retrieve WooCommerce order statuses for filtering
+	get_order_status_filter_list: function(frm){
+		frappe.call({
+			method: "get_woocommerce_order_status_list",
+			doc: frm.doc,
+			callback: function(r) {
+				// Join the strings with newline characters to create the final string
+				const options = r.message.join('\n');
+
+				// Set the Options property for the whitelisted order statuses grid
+				frm.fields_dict.whitelisted_order_statuses.grid.update_docfield_property(
+					"order_status",
 					"options",
 					options
 				);
