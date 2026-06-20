@@ -655,10 +655,13 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			return False
 
 		# Update product images array with the new media entry
+		# Store ID as integer — WooCommerce expects attachment IDs as integers
+		# and the before_db_update hook sends ID-only objects to avoid duplicate downloads
+		new_image_id = int(media_response["id"])
 		wc_product.images = json.dumps(
 			[
 				{
-					"id": media_response["id"],
+					"id": new_image_id,
 					"src": media_response.get("src", ""),
 					"name": media_response.get("name", image_details[0]),
 					"alt": media_response.get("alt", item.item.item_name),

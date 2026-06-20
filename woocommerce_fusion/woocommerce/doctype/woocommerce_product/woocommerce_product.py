@@ -112,7 +112,35 @@ class WooCommerceProduct(WooCommerceResource):
 		return self.clean_up_product_before_write(product)
 
 	def before_db_update(self, product: Dict):
-		return self.clean_up_product_before_write(product)
+		product = self.clean_up_product_before_write(product)
+
+		# Prevent image duplication on PUT requests:
+		# When images already have a WordPress Attachment ID, send only {"id": <int>}
+		# instead of the full object with "src" URL. WooCommerce re-downloads images
+		# from URLs on every PUT, creating duplicates. Sending just the ID makes
+		# WooCommerce link to the existing media entry.
+		if "images" in product and product["images"]:
+			images = product["images"]
+			if isinstance(images, str):
+				images = json.loads(images)
+
+			id_only_images = []
+			for img in images:
+				if isinstance(img, dict) and img.get("id"):
+					# Send only the attachment ID — WooCommerce will keep the
+					# existing media file instead of downloading a new copy
+					try:
+						id_only_images.append({"id": int(img["id"])})
+					except (ValueError, TypeError):
+						# If ID is not a valid integer, keep the full image dict
+						id_only_images.append(img)
+				else:
+					# No ID available (e.g. brand-new image via URL) — keep as-is
+					id_only_images.append(img)
+
+			product["images"] = json.dumps(id_only_images)
+
+		return product
 
 	def after_db_update(self):
 		pass
