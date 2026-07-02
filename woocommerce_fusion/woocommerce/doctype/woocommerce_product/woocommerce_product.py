@@ -138,7 +138,7 @@ class WooCommerceProduct(WooCommerceResource):
 					# No ID available (e.g. brand-new image via URL) — keep as-is
 					id_only_images.append(img)
 
-			product["images"] = json.dumps(id_only_images)
+			product["images"] = id_only_images
 
 		return product
 

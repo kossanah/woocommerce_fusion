@@ -594,11 +594,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 						jsonpath_expr.update(wc_product_with_deserialised_fields, erpnext_item_field_value)
 						wc_product_dirty = True
 
-				if wc_product_dirty:
-					# Re-serialize the WooCommerce Product's list and dict fields, because we deserialized earlier
-					woocommerce_product = woocommerce_product.serialize_attributes_of_type_dict_or_list(
-						wc_product_with_deserialised_fields
-					)
+				# Re-serialize the WooCommerce Product's list and dict fields, because we deserialized earlier
+				woocommerce_product = woocommerce_product.serialize_attributes_of_type_dict_or_list(
+					wc_product_with_deserialised_fields
+				)
 
 		return wc_product_dirty, woocommerce_product
 
