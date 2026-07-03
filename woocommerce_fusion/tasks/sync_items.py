@@ -211,10 +211,21 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 			wc_products = get_list_of_wc_products(item=self.item)
 			if len(wc_products) == 0:
-				raise ValueError(
-					f"No WooCommerce Product found with ID {self.item.item_woocommerce_server.woocommerce_id} on {self.item.item_woocommerce_server.woocommerce_server}"
+				# Clear stale ID and associated sync metadata to trigger recreation / re-linking
+				frappe.db.set_value(
+					"Item WooCommerce Server",
+					self.item.item_woocommerce_server.name,
+					{
+						"woocommerce_id": None,
+						"woocommerce_last_sync_hash": None,
+						"woocommerce_image_id": None,
+						"woocommerce_last_image_url": None,
+					},
+					update_modified=False,
 				)
-			self.woocommerce_product = wc_products[0]
+				self.item.item_woocommerce_server.woocommerce_id = None
+			else:
+				self.woocommerce_product = wc_products[0]
 
 		if self.woocommerce_product and not self.item:
 			self.get_erpnext_item()
