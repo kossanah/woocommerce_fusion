@@ -113,10 +113,13 @@ class WooCommerceResource(Document):
 
 		# Get WooCommerce Record
 		try:
-			record = self.current_wc_api.api.get(f"{self.resource}/{record_id}").json()
+			response = self.current_wc_api.api.get(f"{self.resource}/{record_id}")
+			record = response.json()
 		except Exception as err:
+			response_text = getattr(response, "text", "No response text") if 'response' in locals() else "No response"
 			error_text = (
-				f"load_from_db failed (WooCommerce {self.resource} #{record_id})\n\n{frappe.get_traceback()}"
+				f"load_from_db failed (WooCommerce {self.resource} #{record_id})\n"
+				f"Response: {response_text}\n\n{frappe.get_traceback()}"
 			)
 			log_and_raise_error(error_text)
 
