@@ -22,7 +22,7 @@
   "view_webhook_config",
   "tab_sales_orders",
   "column_break_tefw",
-  "sync_sales_orders",
+  "disable_sales_order_sync",
   "column_break_utsi",
   "sync_so_items_to_wc",
   "section_so_defaults",
@@ -440,9 +440,10 @@
    "fieldtype": "Column Break"
   },
   {
-   "fieldname": "sync_sales_orders",
-   "fieldtype": "HTML",
-   "options": "\n\t\t\t<div class=\"checkbox\">\n\t\t\t\t<label>\n\t\t\t\t\t<span class=\"input-area\" style=\"display: none;\"></span>\n\t\t\t\t\t<span class=\"disp-area\"><input type=\"checkbox\" disabled class=\"disabled-selected\"></span>\n\t\t\t\t\t<span class=\"label-area\">Synchronise Sales Orders</span>\n\t\t\t\t\t<span class=\"ml-1 help\"></span>\n\t\t\t\t</label>\n\t\t\t\t<p class=\"help-box small text-muted\">Create new ERPNext Sales Orders for existing and new WooCommerce Sales Orders. This can not be turned off.</p>\n\t\t\t</div>\n\t\t<span class=\"tooltip-content\">enable_so_sync</span>"
+   "default": "0",
+   "fieldname": "disable_sales_order_sync",
+   "fieldtype": "Check",
+   "label": "Disable Sales Order Sync"
   },
   {
    "fieldname": "section_addresses",

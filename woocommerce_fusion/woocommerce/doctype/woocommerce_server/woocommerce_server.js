@@ -81,6 +81,7 @@ frappe.ui.form.on('WooCommerce Server', {
 	if (frm.doc.sync_only_specific_order_statuses && !frm.fields_dict.whitelisted_order_statuses.grid.get_docfield("order_status").options) {
 		frm.trigger('get_order_status_filter_list');
 	}
+		let warningHTML = `
 			<div class="form-message red">
 				<div>
 					${__("This setting is Experimental. Monitor your Error Log after enabling this setting")}

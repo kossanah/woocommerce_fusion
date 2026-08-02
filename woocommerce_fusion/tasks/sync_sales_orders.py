@@ -57,6 +57,9 @@ def run_sales_order_sync(
 			)
 			woocommerce_order.load_from_db()
 
+		if frappe.db.get_value("WooCommerce Server", woocommerce_order.woocommerce_server, "disable_sales_order_sync"):
+			return None, None
+
 		# Trigger sync
 		sync = SynchroniseSalesOrder(woocommerce_order=woocommerce_order)
 		if enqueue:
@@ -69,6 +72,10 @@ def run_sales_order_sync(
 			sales_order = frappe.get_doc("Sales Order", sales_order_name)
 		if not sales_order.woocommerce_server:
 			frappe.throw(_("No WooCommerce Server defined for Sales Order {0}").format(sales_order_name))
+			
+		if frappe.db.get_value("WooCommerce Server", sales_order.woocommerce_server, "disable_sales_order_sync"):
+			return None, None
+			
 		# Trigger sync for every linked server
 		sync = SynchroniseSalesOrder(sales_order=sales_order)
 		if enqueue:
