@@ -173,7 +173,13 @@ def update_stock_levels_for_items(item_codes):
 				},
 				fields=["woocommerce_id", "parent_id"],
 			)
-			wc_product_parent_map = {p.woocommerce_id: p.parent_id for p in wc_products if p.parent_id}
+			for p in wc_products:
+				p_dict = frappe._dict(p)
+				parent_id = p_dict.get("parent_id")
+				woo_id = p_dict.get("woocommerce_id") or p_dict.get("id")
+				if parent_id and woo_id:
+					wc_product_parent_map[woo_id] = parent_id
+					wc_product_parent_map[str(woo_id)] = parent_id
 
 		parent_items = list(set([item.variant_of for item in items_to_sync if item.variant_of]))
 		parent_item_map = {}
@@ -187,7 +193,10 @@ def update_stock_levels_for_items(item_codes):
 				},
 				fields=["parent", "woocommerce_id"],
 			)
-			parent_item_map = {p.parent: p.woocommerce_id for p in parent_wc_servers if p.woocommerce_id}
+			for p in parent_wc_servers:
+				p_dict = frappe._dict(p)
+				if p_dict.get("woocommerce_id") and p_dict.get("parent"):
+					parent_item_map[p_dict.get("parent")] = p_dict.get("woocommerce_id")
 
 		def get_parent_id(item):
 			p_id = wc_product_parent_map.get(item.woocommerce_id)
