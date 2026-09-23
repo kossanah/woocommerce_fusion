@@ -137,6 +137,7 @@ class WooCommerceResource(Document):
 
 	def call_super_init(self, record: Dict):
 		super(Document, self).__init__(record)
+		self._doc_before_save = None
 
 	def check_if_latest(self):
 		"""
@@ -144,6 +145,11 @@ class WooCommerceResource(Document):
 		"""
 		if not hasattr(self, "_action"):
 			self._action = "save"
+		if not hasattr(self, "_doc_before_save"):
+			self._doc_before_save = None
+
+	def load_doc_before_save(self, *args, **kwargs):
+		self._doc_before_save = None
 
 	def after_load_from_db(self, record: Dict):
 		return record
