@@ -142,7 +142,8 @@ class WooCommerceResource(Document):
 		"""
 		Virtual doctypes connect to external REST APIs and do not use DB-level modified timestamp locking.
 		"""
-		pass
+		if not hasattr(self, "_action"):
+			self._action = "save"
 
 	def after_load_from_db(self, record: Dict):
 		return record
