@@ -164,6 +164,7 @@ def update_stock_levels_for_items(item_codes):
 		# Fetch parents for variants
 		variant_woo_ids = [item.woocommerce_id for item in items_to_sync if item.variant_of]
 		wc_product_parent_map = {}
+		known_simple_products = set()
 		if variant_woo_ids:
 			wc_products = frappe.get_all(
 				"WooCommerce Product",
@@ -177,9 +178,13 @@ def update_stock_levels_for_items(item_codes):
 				p_dict = frappe._dict(p)
 				parent_id = p_dict.get("parent_id")
 				woo_id = p_dict.get("woocommerce_id") or p_dict.get("id")
-				if parent_id and woo_id:
-					wc_product_parent_map[woo_id] = parent_id
-					wc_product_parent_map[str(woo_id)] = parent_id
+				if woo_id:
+					if parent_id and int(parent_id) > 0:
+						wc_product_parent_map[woo_id] = parent_id
+						wc_product_parent_map[str(woo_id)] = parent_id
+					else:
+						known_simple_products.add(str(woo_id))
+						known_simple_products.add(woo_id)
 
 		parent_items = list(set([item.variant_of for item in items_to_sync if item.variant_of]))
 		parent_item_map = {}
@@ -199,11 +204,14 @@ def update_stock_levels_for_items(item_codes):
 					parent_item_map[p_dict.get("parent")] = p_dict.get("woocommerce_id")
 
 		def get_parent_id(item):
-			p_id = wc_product_parent_map.get(item.woocommerce_id)
-			if p_id:
+			woo_id = str(item.woocommerce_id)
+			if woo_id in known_simple_products or item.woocommerce_id in known_simple_products:
+				return None
+			p_id = wc_product_parent_map.get(item.woocommerce_id) or wc_product_parent_map.get(woo_id)
+			if p_id and int(p_id) > 0:
 				return str(p_id)
 			p_id = parent_item_map.get(item.variant_of)
-			if p_id:
+			if p_id and int(p_id) > 0:
 				return str(p_id)
 			return None
 
@@ -245,21 +253,33 @@ def update_stock_levels_for_items(item_codes):
 				chunk = variations[i : i + 100]
 				payload = {"update": chunk}
 				response = wc_api.post(endpoint=f"products/{parent_id}/variations/batch", data=payload)
+				failed_ids = set()
 				if response.status_code != 200:
-					# Batch variation update failed. Fallback: try updating them as simple products
-					frappe.logger().warning(
-						f"WooCommerce Batch Variation Update failed for parent {parent_id} (status: {response.status_code}). "
-						f"Attempting fallback to simple product batch update."
-					)
-					# Try simple product batch update fallback
-					response_fallback = wc_api.post(endpoint="products/batch", data=payload)
-					if response_fallback.status_code != 200:
-						error_message = (
-							f"Batch Update variations fallback failed (status: {response_fallback.status_code})\n\n"
-							f"Response: {response_fallback.text}"
+					failed_ids.update(x["id"] for x in chunk)
+				else:
+					try:
+						resp_data = response.json()
+						for res_item in resp_data.get("update", []):
+							if isinstance(res_item, dict) and "error" in res_item:
+								failed_ids.add(res_item.get("id"))
+					except Exception:
+						pass
+
+				if failed_ids:
+					fallback_chunk = [x for x in chunk if x["id"] in failed_ids or str(x["id"]) in failed_ids]
+					if fallback_chunk:
+						frappe.logger().warning(
+							f"WooCommerce Batch Variation Update had errors for parent {parent_id}, items {failed_ids}. "
+							f"Attempting fallback to simple product batch update."
 						)
-						frappe.log_error("WooCommerce Batch Update Error", error_message)
-						raise ValueError(error_message)
+						response_fallback = wc_api.post(endpoint="products/batch", data={"update": fallback_chunk})
+						if response_fallback.status_code != 200:
+							error_message = (
+								f"Batch Update variations fallback failed (status: {response_fallback.status_code})\n\n"
+								f"Response: {response_fallback.text}"
+							)
+							frappe.log_error("WooCommerce Batch Update Error", error_message)
+							raise ValueError(error_message)
 				time.sleep(0.5)
 
 	return True
