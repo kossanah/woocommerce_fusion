@@ -499,6 +499,7 @@ def get_wc_parameters_from_filters(filters):
 		"date_created",
 		"date_modified",
 		"id",
+		"woocommerce_id",
 		"name",
 		"status",
 		"woocommerce_server",
@@ -510,6 +511,8 @@ def get_wc_parameters_from_filters(filters):
 	for filter in filters:
 		if filter[1] not in supported_filter_fields:
 			frappe.throw(f"Unsupported filter for field: {filter[1]}")
+		if filter[1] == "woocommerce_server":
+			continue
 		if filter[1] == "date_created" and filter[2] == "<":
 			# e.g. ['WooCommerce Order', 'date_created', '<', '2023-01-01']
 			params["before"] = filter[3]
@@ -548,13 +551,13 @@ def get_wc_parameters_from_filters(filters):
 				get_datetime(f"{filter[3][1]} 00:00:00"), "yyyy-MM-dd HH:mm:ss"
 			)
 			continue
-		if filter[1] == "id" and filter[2] == "=":
+		if filter[1] in ("id", "woocommerce_id") and filter[2] == "=":
 			# e.g. ['WooCommerce Order', 'id', '=', '11']
-			params["include"] = [filter[3]]
+			params["include"] = [str(filter[3])]
 			continue
-		if filter[1] == "id" and filter[2] == "in":
+		if filter[1] in ("id", "woocommerce_id") and filter[2] == "in":
 			# e.g. ['WooCommerce Order', 'id', 'in', ['11', '12', '13']]
-			params["include"] = ",".join(filter[3])
+			params["include"] = ",".join(str(x) for x in filter[3])
 			continue
 		if filter[1] == "name" and filter[2] == "like":
 			# e.g. ['WooCommerce Order', 'name', 'like', '%11%']

@@ -152,19 +152,26 @@ class WooCommerceProduct(WooCommerceResource):
 		"""
 
 		# Convert back to string
-		product["weight"] = str(product["weight"])
-		product["regular_price"] = str(product["regular_price"])
+		if product.get("weight") is not None:
+			product["weight"] = str(product["weight"])
+
+		# Do not post regular_price if product is variable or price is empty/None
+		if product.get("type") == "variable" or product.get("regular_price") in (None, "", "None"):
+			product.pop("regular_price", None)
+		else:
+			product["regular_price"] = str(product["regular_price"])
 
 		# Do not post Sale Price if it is 0
-		if product["sale_price"] and float(product["sale_price"]) > 0:
+		if product.get("sale_price") and float(product.get("sale_price", 0)) > 0:
 			product["sale_price"] = str(product["sale_price"])
 		else:
-			product.pop("sale_price")
+			product.pop("sale_price", None)
 
 		# Set corrected properties
-		product["name"] = str(product["woocommerce_name"])
+		if product.get("woocommerce_name") is not None:
+			product["name"] = str(product["woocommerce_name"])
 
 		# Drop 'related_ids' field
-		product.pop("related_ids")
+		product.pop("related_ids", None)
 
 		return product

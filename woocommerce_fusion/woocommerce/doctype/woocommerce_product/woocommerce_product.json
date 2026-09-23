@@ -481,13 +481,13 @@
    "fieldname": "title",
    "fieldtype": "Data",
    "hidden": 1,
-   "label": "Title"
+   "label": "Title",
+   "length": 500
   },
   {
    "fieldname": "regular_price",
    "fieldtype": "Float",
-   "label": "Regular Price",
-   "reqd": 1
+   "label": "Regular Price"
   }
  ],
  "grid_page_length": 50,
