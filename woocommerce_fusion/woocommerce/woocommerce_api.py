@@ -138,6 +138,12 @@ class WooCommerceResource(Document):
 	def call_super_init(self, record: Dict):
 		super(Document, self).__init__(record)
 
+	def check_if_latest(self):
+		"""
+		Virtual doctypes connect to external REST APIs and do not use DB-level modified timestamp locking.
+		"""
+		pass
+
 	def after_load_from_db(self, record: Dict):
 		return record
 

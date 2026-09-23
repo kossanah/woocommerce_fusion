@@ -338,6 +338,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product_dirty = True
 
 		if wc_product_dirty:
+			wc_product.flags.ignore_version = True
 			wc_product.save()
 
 		self.woocommerce_product = wc_product
