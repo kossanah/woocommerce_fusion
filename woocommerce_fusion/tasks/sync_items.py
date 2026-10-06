@@ -33,6 +33,37 @@ def run_item_sync_from_hook(doc, method):
 		and not doc.flags.get("created_by_sync", None)
 		and len(doc.woocommerce_servers) > 0
 	):
+		# If this is a simple item (no variants) with no existing WooCommerce ID,
+		# check if it has a valid price > 0 before enqueueing sync
+		if not doc.has_variants:
+			has_existing_wc_id = any(s.woocommerce_id for s in doc.woocommerce_servers if s.enabled)
+			if not has_existing_wc_id:
+				has_valid_price = False
+				for s in doc.woocommerce_servers:
+					if s.enabled:
+						wc_server = frappe.get_cached_doc("WooCommerce Server", s.woocommerce_server)
+						if wc_server.enable_price_list_sync and wc_server.price_list:
+							rate = frappe.db.get_value(
+								"Item Price",
+								{"item_code": doc.name, "price_list": wc_server.price_list},
+								"price_list_rate",
+							)
+							if rate and float(rate) > 0:
+								has_valid_price = True
+								break
+						else:
+							has_valid_price = True
+							break
+				if not has_valid_price:
+					frappe.msgprint(
+						_("Sync to WooCommerce skipped for {0}: item has 0 or no price in price list.").format(
+							frappe.bold(doc.name)
+						),
+						indicator="orange",
+						alert=True,
+					)
+					return
+
 		frappe.msgprint(
 			_("Background sync to WooCommerce triggered for {0} {1}").format(frappe.bold(doc.name), method),
 			indicator="blue",
@@ -323,6 +354,29 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		"""
 		wc_product_dirty = False
 
+		# Skip or draft simple items and variations with zero or no price
+		if not item.item.has_variants:
+			pricing = get_item_price_rate(item)
+			if pricing is None or float(pricing) <= 0:
+				if wc_product.status != "draft":
+					wc_product.status = "draft"
+					wc_product.flags.ignore_version = True
+					wc_product.save()
+					self.woocommerce_product = wc_product
+					self.set_sync_hash()
+				frappe.logger("woocommerce_fusion").info(
+					f"Item {item.item.name} has zero or no price. Marked WooCommerce product {wc_product.woocommerce_id} as draft."
+				)
+				return
+			else:
+				# If product was previously draft due to zero price, restore publish status
+				if wc_product.status == "draft":
+					wc_server = frappe.get_cached_doc(
+						"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
+					)
+					wc_product.status = wc_server.new_product_publish_status or "publish"
+					wc_product_dirty = True
+
 		# Update properties
 		if wc_product.woocommerce_name != item.item.item_name:
 			wc_product.woocommerce_name = item.item.item_name
@@ -353,6 +407,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			and item.item_woocommerce_server.enabled
 			and not item.item_woocommerce_server.woocommerce_id
 		):
+			# Skip simple items and variations that have zero or no price
+			if not item.item.has_variants:
+				pricing = get_item_price_rate(item)
+				if pricing is None or float(pricing) <= 0:
+					frappe.logger("woocommerce_fusion").info(
+						f"Skipping WooCommerce sync for Item {item.item.name}: price is zero or not set."
+					)
+					return
 			# Create a new WooCommerce Product doc
 			wc_product = frappe.get_doc({"doctype": "WooCommerce Product"})
 
@@ -829,17 +891,24 @@ def get_item_price_rate(item: ERPNextItemToSync):
 	wc_server = frappe.get_cached_doc(
 		"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
 	)
-	if wc_server.enable_price_list_sync:
+	if wc_server.enable_price_list_sync and wc_server.price_list:
+		item_code = getattr(item.item, "item_code", None) or item.item.name
 		item_prices = frappe.get_all(
 			"Item Price",
-			filters={"item_code": item.item.item_name, "price_list": wc_server.price_list},
+			filters={"item_code": item_code, "price_list": wc_server.price_list},
 			fields=["price_list_rate", "valid_upto"],
 		)
+		if not item_prices and getattr(item.item, "item_name", None) and item.item.item_name != item_code:
+			item_prices = frappe.get_all(
+				"Item Price",
+				filters={"item_code": item.item.item_name, "price_list": wc_server.price_list},
+				fields=["price_list_rate", "valid_upto"],
+			)
 		return next(
 			(
 				price.price_list_rate
 				for price in item_prices
-				if not price.valid_upto or price.valid_upto > now()
+				if (not price.valid_upto or price.valid_upto > now()) and price.price_list_rate is not None
 			),
 			None,
 		)

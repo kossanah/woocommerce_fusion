@@ -122,6 +122,19 @@ class SynchroniseItemPrice(SynchroniseWooCommerce):
 					if self.item_price_doc and self.item_price_doc.price_list == self.wc_server.price_list
 					else item_price.price_list_rate
 				)
+
+				# If price is 0 or less, mark WooCommerce product as draft so it does not appear on front-end
+				if price_list_rate is None or float(price_list_rate) <= 0:
+					if wc_product.status != "draft":
+						wc_product.status = "draft"
+						wc_product.save()
+					continue
+
+				status_changed = False
+				if wc_product.status == "draft":
+					wc_product.status = self.wc_server.new_product_publish_status or "publish"
+					status_changed = True
+
 				# Handle blank string for regular_price
 				if not wc_product.regular_price:
 					wc_product.regular_price = 0
@@ -131,7 +144,7 @@ class SynchroniseItemPrice(SynchroniseWooCommerce):
 					if isinstance(wc_product.regular_price, str)
 					else wc_product.regular_price
 				)
-				if wc_product_regular_price != price_list_rate:
+				if wc_product_regular_price != float(price_list_rate) or status_changed:
 					wc_product.regular_price = price_list_rate
 					wc_product.save()
 			except Exception:

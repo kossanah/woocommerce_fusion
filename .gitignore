@@ -8,3 +8,6 @@ node_modules/
 woocommerce_fusion/tasks/sync_item_prices.py.bk
 woocommerce_fusion/tasks/sync_items-old.py
 scripts/
+*.php
+wp_dedupe_family.php
+wp_dedupe_family.log
