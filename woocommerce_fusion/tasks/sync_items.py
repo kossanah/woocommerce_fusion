@@ -1,3 +1,4 @@
+import urllib.parse
 import json
 import time
 from dataclasses import dataclass
@@ -201,7 +202,7 @@ def sync_woocommerce_products_modified_since(date_time_from=None):
 def format_erpnext_img_url(image_details) -> Optional[str]:
 	"""
 	Return a publicly accessible URL for an ERPNext file, or None if the file is private
-	or unavailable.
+	or unavailable. Safe-encodes spaces and special characters.
 
 	image_details is a tuple/list from frappe.db.get_value with fields:
 	  [0] file_name, [1] file_url, [2] is_private, [3] content_hash, [4] modified
@@ -210,10 +211,11 @@ def format_erpnext_img_url(image_details) -> Optional[str]:
 		file_url = image_details[1]
 		if file_url:
 			if file_url.startswith("/"):
-				# Relative URL — prepend the site URL
+				# Relative URL — prepend the site URL and encode spaces
 				site_url = frappe.utils.get_url()
-				return f"{site_url.rstrip('/')}{file_url}"
-			return file_url
+				quoted_path = urllib.parse.quote(file_url, safe="/:")
+				return f"{site_url.rstrip('/')}{quoted_path}"
+			return urllib.parse.quote(file_url, safe="/:?=&")
 	return None
 
 
