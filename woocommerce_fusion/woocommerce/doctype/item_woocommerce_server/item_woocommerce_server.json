@@ -58,7 +58,7 @@
   },
   {
    "fieldname": "woocommerce_last_image_url",
-   "fieldtype": "Data",
+   "fieldtype": "Small Text",
    "label": "Last Synced Image URL",
    "read_only": 1,
    "hidden": 1,

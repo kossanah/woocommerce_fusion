@@ -26,6 +26,15 @@ from woocommerce_fusion.woocommerce.woocommerce_api import (
 )
 
 
+
+def safe_int(val, default=None):
+	try:
+		if val is None or str(val).strip().lower() in ("none", "", "null"):
+			return default
+		return int(val)
+	except (ValueError, TypeError):
+		return default
+
 def run_item_sync_from_hook(doc, method):
 	"""
 	Intended to be triggered by a Document Controller hook from Item.
@@ -360,7 +369,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			# create missing item in ERPNext
 			self.create_item(self.woocommerce_product)
 		elif self.item and self.woocommerce_product:
-			if self.force_push:
+			if getattr(self, "force_push", False):
 				self.update_woocommerce_product(self.woocommerce_product, self.item)
 			else:
 				# both exist, check sync hash
@@ -465,7 +474,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if image_dirty:
 			wc_product_dirty = True
 
-		if wc_product_dirty or self.force_push:
+		if wc_product_dirty or getattr(self, "force_push", False):
 			wc_product.flags.ignore_version = True
 			wc_product.save()
 
@@ -785,13 +794,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			existing_wc_images = json.loads(wc_product.images) if isinstance(wc_product.images, str) else wc_product.images
 			if existing_wc_images and isinstance(existing_wc_images, list) and len(existing_wc_images) > 0:
 				first_img = existing_wc_images[0]
-				if isinstance(first_img, dict) and first_img.get("id"):
+				first_img_id = safe_int(first_img.get("id")) if isinstance(first_img, dict) else None
+				if first_img_id:
 					wc_img_name = str(first_img.get("name", "")).lower()
 					wc_img_src = str(first_img.get("src", "")).lower()
 					clean_file_base = file_name.rsplit(".", 1)[0].lower()
 					if clean_file_base in wc_img_name or clean_file_base in wc_img_src:
 						# Same image already on WooCommerce: adopt existing ID
-						existing_id = int(first_img["id"])
+						existing_id = first_img_id
 						self._update_item_wc_image_meta(
 							item.item_woocommerce_server.name,
 							existing_id,
@@ -817,7 +827,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if not media_response or not media_response.get("id"):
 			return False
 
-		new_image_id = int(media_response["id"])
+		new_image_id = safe_int(media_response.get("id"))
 		wc_product.images = json.dumps(
 			[
 				{
