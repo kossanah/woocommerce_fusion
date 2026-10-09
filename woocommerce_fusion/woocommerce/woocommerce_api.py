@@ -123,7 +123,21 @@ class WooCommerceResource(Document):
 			)
 			log_and_raise_error(error_text)
 
-		if "id" not in record:
+		if not isinstance(record, dict) or "id" not in record:
+			status = getattr(response, "status_code", None)
+			is_not_found = (
+				status == 404
+				or (isinstance(record, dict) and record.get("data", {}).get("status") == 404)
+				or (
+					isinstance(record, dict)
+					and record.get("code")
+					in ("woocommerce_rest_product_invalid_id", "woocommerce_rest_cannot_view")
+				)
+			)
+			if is_not_found:
+				raise frappe.DoesNotExistError(
+					f"WooCommerce {self.resource} #{record_id} does not exist"
+				)
 			log_and_raise_error(
 				error_text=f"load_from_db failed (WooCommerce {self.resource} #{record_id})\nOrder:\n{str(record)}"
 			)
@@ -337,6 +351,11 @@ class WooCommerceResource(Document):
 			log_and_raise_error(error_text="db_insert failed", response=response)
 		self.woocommerce_id = response.json()["id"]
 		self.woocommerce_date_modified = response.json()["date_modified"]
+		wc_server_domain = parse_domain_from_url(self.current_wc_api.woocommerce_server_url)
+		self.woocommerce_server = wc_server_domain
+		self.name = generate_woocommerce_record_name_from_domain_and_id(
+			domain=wc_server_domain, resource_id=self.woocommerce_id
+		)
 
 	def before_db_insert(self, record: Dict):
 		return record
@@ -371,7 +390,21 @@ class WooCommerceResource(Document):
 				record.pop(key)
 
 		# Parse the server domain and id from the Document name
-		wc_server_domain, id = get_domain_and_id_from_woocommerce_record_name(self.name)
+		if self.name and WC_RESOURCE_DELIMITER in str(self.name):
+			wc_server_domain, id = get_domain_and_id_from_woocommerce_record_name(self.name)
+		else:
+			wc_server_domain = (
+				parse_domain_from_url(self.current_wc_api.woocommerce_server_url)
+				if getattr(self, "current_wc_api", None)
+				else getattr(self, "woocommerce_server", None)
+			)
+			id = self.woocommerce_id
+			if wc_server_domain and id:
+				self.name = generate_woocommerce_record_name_from_domain_and_id(
+					domain=wc_server_domain, resource_id=id
+				)
+			else:
+				wc_server_domain, id = get_domain_and_id_from_woocommerce_record_name(self.name)
 
 		# Select the relevant WooCommerce server
 		self.current_wc_api = next(

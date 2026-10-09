@@ -22,6 +22,7 @@ from woocommerce_fusion.woocommerce.doctype.woocommerce_server.woocommerce_serve
 	WooCommerceServer,
 )
 from woocommerce_fusion.woocommerce.woocommerce_api import (
+	WC_RESOURCE_DELIMITER,
 	generate_woocommerce_record_name_from_domain_and_id,
 )
 
@@ -409,7 +410,15 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			item.item.flags.created_by_sync = True
 			item.item.flags.in_sync = True
 			item.item.flags.ignore_mandatory = True
-			item.item.save()
+			try:
+				item.item.save()
+			except frappe.exceptions.TimestampMismatchError:
+				item.item.reload()
+				fields_updated, item.item = self.set_item_fields(item=item.item)
+				item.item.flags.created_by_sync = True
+				item.item.flags.in_sync = True
+				item.item.flags.ignore_mandatory = True
+				item.item.save()
 
 		self.set_sync_hash()
 
@@ -555,14 +564,26 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			self.set_product_fields(wc_product, item)
 
 			wc_product.insert()
+			if not wc_product.name or WC_RESOURCE_DELIMITER not in str(wc_product.name):
+				wc_product.name = generate_woocommerce_record_name_from_domain_and_id(
+					domain=item.item_woocommerce_server.woocommerce_server,
+					resource_id=wc_product.woocommerce_id,
+				)
 			self.woocommerce_product = wc_product
 
 			# Reload ERPNext Item
 			item.item.reload()
-			item.item_woocommerce_server.woocommerce_id = wc_product.woocommerce_id
+			item.item_woocommerce_server.woocommerce_id = str(wc_product.woocommerce_id)
 			item.item.flags.created_by_sync = True
 			item.item.flags.in_sync = True
-			item.item.save()
+			try:
+				item.item.save()
+			except frappe.exceptions.TimestampMismatchError:
+				item.item.reload()
+				item.item_woocommerce_server.woocommerce_id = str(wc_product.woocommerce_id)
+				item.item.flags.created_by_sync = True
+				item.item.flags.in_sync = True
+				item.item.save()
 
 			# Upload image to WooCommerce after product is created (woocommerce_id is now available)
 			if self._sync_item_image_to_woocommerce(wc_product, item):
