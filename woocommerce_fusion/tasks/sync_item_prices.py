@@ -1,4 +1,5 @@
-from time import sleep
+import time
+from collections import defaultdict
 from typing import List, Optional
 
 import frappe
@@ -7,17 +8,15 @@ from frappe import qb
 from frappe.query_builder import Criterion
 
 from woocommerce_fusion.tasks.sync import SynchroniseWooCommerce
+from woocommerce_fusion.tasks.utils import APIWithRequestLogging
 from woocommerce_fusion.woocommerce.doctype.woocommerce_server.woocommerce_server import (
 	WooCommerceServer,
-)
-from woocommerce_fusion.woocommerce.woocommerce_api import (
-	generate_woocommerce_record_name_from_domain_and_id,
 )
 
 
 def update_item_price_for_woocommerce_item_from_hook(doc, method):
 	if not frappe.flags.in_test:
-		if doc.doctype == "Item Price":
+		if doc.doctype == "Item Price" and not getattr(doc.flags, "in_sync", False):
 			frappe.enqueue(
 				"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync",
 				enqueue_after_commit=True,
@@ -28,6 +27,13 @@ def update_item_price_for_woocommerce_item_from_hook(doc, method):
 
 @frappe.whitelist()
 def run_item_price_sync_in_background():
+	servers = frappe.get_all(
+		"WooCommerce Server",
+		filters={"enable_sync": 1, "enable_price_list_sync": 1, "enable_scheduled_price_sync": 1},
+		fields=["name"],
+	)
+	if not servers:
+		return
 	frappe.enqueue(run_item_price_sync, queue="long", timeout=3600)
 
 
@@ -42,7 +48,7 @@ def run_item_price_sync(
 
 class SynchroniseItemPrice(SynchroniseWooCommerce):
 	"""
-	Class for managing synchronisation of ERPNext Items with WooCommerce Products
+	Class for managing synchronisation of ERPNext Items with WooCommerce Products via Batch API
 	"""
 
 	item_code: Optional[str]
@@ -62,16 +68,31 @@ class SynchroniseItemPrice(SynchroniseWooCommerce):
 
 	def run(self) -> None:
 		"""
-		Run synchornisation
+		Run synchronisation with concurrency locking
 		"""
 		for server in self.servers:
 			self.wc_server = server
 			self.get_erpnext_item_prices()
-			self.sync_items_with_woocommerce_products()
+			if not self.item_price_list:
+				continue
+
+			# Distributed Redis lock to prevent multiple concurrent sync workers
+			lock_name = f"wc_price_sync_{self.wc_server.name}"
+			try:
+				with frappe.cache().lock(lock_name, timeout=3600):
+					self.sync_items_with_woocommerce_products()
+			except Exception as e:
+				if "lock" in str(e).lower():
+					frappe.logger().warning(
+						f"WooCommerce Price Sync for {self.wc_server.name} skipped: another sync job is currently in progress."
+					)
+				else:
+					frappe.log_error(f"WooCommerce Price Sync Error: {self.wc_server.name}", frappe.get_traceback())
+					raise e
 
 	def get_erpnext_item_prices(self) -> None:
 		"""
-		Get list of ERPNext Item Prices to synchronise,
+		Get list of ERPNext Item Prices to synchronise
 		"""
 		self.item_price_list = []
 		if (
@@ -104,51 +125,116 @@ class SynchroniseItemPrice(SynchroniseWooCommerce):
 
 	def sync_items_with_woocommerce_products(self) -> None:
 		"""
-		Synchronise Item Prices with WooCommerce Products
+		Synchronise Item Prices with WooCommerce Products using WooCommerce Batch API (up to 100 items per request)
 		"""
-		for item_price in self.item_price_list:
-			# Get the WooCommerce Product doc
-			wc_product_name = generate_woocommerce_record_name_from_domain_and_id(
-				domain=item_price.woocommerce_server, resource_id=item_price.woocommerce_id
+		if not self.item_price_list:
+			return
+
+		wc_api = APIWithRequestLogging(
+			url=self.wc_server.woocommerce_server_url,
+			consumer_key=self.wc_server.api_consumer_key,
+			consumer_secret=self.wc_server.api_consumer_secret,
+			version="wc/v3",
+			timeout=40,
+			verify_ssl=True,
+		)
+
+		item_codes = list(set([row.item_code for row in self.item_price_list]))
+
+		# Gather variant info to properly direct variant vs simple product updates
+		variant_info = frappe.get_all(
+			"Item",
+			filters={"name": ["in", item_codes]},
+			fields=["name", "variant_of"],
+		)
+		variant_map = {v.name: v.variant_of for v in variant_info}
+
+		# Look up parent WooCommerce IDs for variants
+		parent_items = list(set([v.variant_of for v in variant_info if v.variant_of]))
+		parent_woo_map = {}
+		if parent_items:
+			parent_wc_rows = frappe.get_all(
+				"Item WooCommerce Server",
+				filters={
+					"parent": ["in", parent_items],
+					"woocommerce_server": self.wc_server.name,
+					"enabled": 1,
+				},
+				fields=["parent", "woocommerce_id"],
 			)
-			wc_product = frappe.get_doc({"doctype": "WooCommerce Product", "name": wc_product_name})
+			for row in parent_wc_rows:
+				if row.woocommerce_id and row.parent:
+					parent_woo_map[row.parent] = str(row.woocommerce_id)
 
-			try:
-				wc_product.load_from_db()
+		simple_updates = []
+		variations_by_parent = defaultdict(list)
 
-				# If self.item_price_doc is set, set the price_list_rate accordingly, else use the price_list_rate from the price list
-				price_list_rate = (
-					self.item_price_doc.price_list_rate
-					if self.item_price_doc and self.item_price_doc.price_list == self.wc_server.price_list
-					else item_price.price_list_rate
-				)
+		for item_price in self.item_price_list:
+			price_list_rate = (
+				self.item_price_doc.price_list_rate
+				if self.item_price_doc and self.item_price_doc.price_list == self.wc_server.price_list
+				else item_price.price_list_rate
+			)
 
-				# If price is 0 or less, mark WooCommerce product as draft so it does not appear on front-end
-				if price_list_rate is None or float(price_list_rate) <= 0:
-					if wc_product.status != "draft":
-						wc_product.status = "draft"
-						wc_product.save()
-					continue
+			rate_val = float(price_list_rate or 0)
+			if rate_val <= 0:
+				update_entry = {
+					"id": int(item_price.woocommerce_id),
+					"status": "draft",
+					"regular_price": "0",
+				}
+			else:
+				update_entry = {
+					"id": int(item_price.woocommerce_id),
+					"regular_price": str(price_list_rate),
+				}
+				if self.wc_server.new_product_publish_status:
+					update_entry["status"] = self.wc_server.new_product_publish_status
 
-				status_changed = False
-				if wc_product.status == "draft":
-					wc_product.status = self.wc_server.new_product_publish_status or "publish"
-					status_changed = True
+			variant_of = variant_map.get(item_price.item_code)
+			parent_woo_id = parent_woo_map.get(variant_of) if variant_of else None
 
-				# Handle blank string for regular_price
-				if not wc_product.regular_price:
-					wc_product.regular_price = 0
-				# When the price is set, the WooCommerce API returns a string value, when the price is not set, it returns a float value of 0.0
-				wc_product_regular_price = (
-					float(wc_product.regular_price)
-					if isinstance(wc_product.regular_price, str)
-					else wc_product.regular_price
-				)
-				if wc_product_regular_price != float(price_list_rate) or status_changed:
-					wc_product.regular_price = price_list_rate
-					wc_product.save()
-			except Exception:
-				error_message = f"{frappe.get_traceback()}\n\n Product Data: \n{str(wc_product.as_dict())}"
-				frappe.log_error("WooCommerce Error: Price List Sync", error_message)
+			if parent_woo_id:
+				variations_by_parent[parent_woo_id].append(update_entry)
+			else:
+				simple_updates.append(update_entry)
 
-			sleep(self.wc_server.price_list_delay_per_item)
+		batch_size = int(self.wc_server.get("batch_size") or 100)
+		batch_delay = float(self.wc_server.get("batch_delay") or 0.5) if not self.item_code else 0.0
+
+		# 1. Update simple / top-level products via Batch API
+		if simple_updates:
+			for i in range(0, len(simple_updates), batch_size):
+				chunk = simple_updates[i : i + batch_size]
+				payload = {"update": chunk}
+				try:
+					res = wc_api.post("products/batch", data=payload)
+					if res.status_code != 200:
+						frappe.log_error(
+							"WooCommerce Price Batch Update Error",
+							f"Status {res.status_code}: {res.text[:500]}\nPayload count: {len(chunk)}",
+						)
+				except Exception:
+					frappe.log_error("WooCommerce Price Batch Exception", frappe.get_traceback())
+				if batch_delay > 0:
+					time.sleep(batch_delay)
+
+		# 2. Update variations grouped by parent via Batch API
+		for parent_id, variations in variations_by_parent.items():
+			for i in range(0, len(variations), batch_size):
+				chunk = variations[i : i + batch_size]
+				payload = {"update": chunk}
+				try:
+					res = wc_api.post(f"products/{parent_id}/variations/batch", data=payload)
+					if res.status_code != 200:
+						# Fallback to simple products batch if parent endpoint rejects
+						res_fallback = wc_api.post("products/batch", data=payload)
+						if res_fallback.status_code != 200:
+							frappe.log_error(
+								"WooCommerce Variation Price Batch Error",
+								f"Parent {parent_id}, Status {res.status_code}: {res.text[:500]}",
+							)
+				except Exception:
+					frappe.log_error("WooCommerce Variation Price Batch Exception", frappe.get_traceback())
+				if batch_delay > 0:
+					time.sleep(batch_delay)

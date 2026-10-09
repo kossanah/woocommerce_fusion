@@ -148,9 +148,8 @@ class WooCommerceProduct(WooCommerceResource):
 	@staticmethod
 	def clean_up_product_before_write(product):
 		"""
-		Perform some tasks to make sure that an product is in the correct format for the WC API
+		Perform some tasks to make sure that a product is in the correct format for the WC API
 		"""
-
 		# Convert back to string
 		if product.get("weight") is not None:
 			product["weight"] = str(product["weight"])
@@ -171,7 +170,26 @@ class WooCommerceProduct(WooCommerceResource):
 		if product.get("woocommerce_name") is not None:
 			product["name"] = str(product["woocommerce_name"])
 
-		# Drop 'related_ids' field
-		product.pop("related_ids", None)
+		# Ensure JSON fields are parsed into native Python objects (dicts/lists), not JSON strings
+		for json_key in ("dimensions", "upsell_ids", "cross_sell_ids", "categories", "tags", "attributes", "default_attributes", "meta_data"):
+			val = product.get(json_key)
+			if isinstance(val, str):
+				try:
+					product[json_key] = json.loads(val)
+				except Exception:
+					product.pop(json_key, None)
+
+		# Drop Frappe-specific UI / read-only fields
+		fields_to_drop = [
+			"related_ids", "title", "permalink", "price",
+			"woocommerce_server", "woocommerce_id", "woocommerce_name",
+			"woocommerce_date_created", "woocommerce_date_created_gmt",
+			"woocommerce_date_modified", "woocommerce_date_modified_gmt",
+			"rating_count", "average_rating", "total_sales",
+			"date_on_sale_from", "date_on_sale_from_gmt", "date_on_sale_to", "date_on_sale_to_gmt",
+		]
+		for key in list(product.keys()):
+			if key in fields_to_drop or key.startswith("section_break_") or key.startswith("column_break_") or key.endswith("_tab"):
+				product.pop(key, None)
 
 		return product

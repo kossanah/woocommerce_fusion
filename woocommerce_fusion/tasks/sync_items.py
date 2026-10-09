@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
@@ -26,11 +27,16 @@ from woocommerce_fusion.woocommerce.woocommerce_api import (
 
 def run_item_sync_from_hook(doc, method):
 	"""
-	Intended to be triggered by a Document Controller hook from Item
+	Intended to be triggered by a Document Controller hook from Item.
+	Guard against recursive hook triggers during sync.
 	"""
+	if frappe.flags.in_test or getattr(frappe.flags, "in_sync", False):
+		return
+
 	if (
 		doc.doctype == "Item"
-		and not doc.flags.get("created_by_sync", None)
+		and not doc.flags.get("created_by_sync", False)
+		and not doc.flags.get("in_sync", False)
 		and len(doc.woocommerce_servers) > 0
 	):
 		# If this is a simple item (no variants) with no existing WooCommerce ID,
@@ -69,7 +75,11 @@ def run_item_sync_from_hook(doc, method):
 			indicator="blue",
 			alert=True,
 		)
-		frappe.enqueue(clear_sync_hash_and_run_item_sync, item_code=doc.name)
+		frappe.enqueue(
+			clear_sync_hash_and_run_item_sync,
+			item_code=doc.name,
+			enqueue_after_commit=True,
+		)
 
 
 @frappe.whitelist()
@@ -78,59 +88,78 @@ def run_item_sync(
 	item: Optional[Item] = None,
 	woocommerce_product_name: Optional[str] = None,
 	woocommerce_product: Optional[WooCommerceProduct] = None,
-	enqueue=False,
-) -> Tuple[Item, WooCommerceProduct]:
+	enqueue: bool = False,
+	force_push: bool = False,
+) -> Tuple[Optional[Item], Optional[WooCommerceProduct]]:
 	"""
-	Helper funtion that prepares arguments for item sync
+	Helper function that prepares arguments for item sync.
+	Guards with frappe.flags.in_sync to prevent recursive hooks during sync execution.
 	"""
 	# Validate inputs, at least one of the parameters should be provided
 	if not any([item_code, item, woocommerce_product_name, woocommerce_product]):
 		raise ValueError(
-			(
-				"At least one of item_code, item, woocommerce_product_name, woocommerce_product parameters required"
-			)
+			"At least one of item_code, item, woocommerce_product_name, woocommerce_product parameters required"
 		)
 
-	# Get ERPNext Item and WooCommerce product if they exist
-	if woocommerce_product or woocommerce_product_name:
-		if not woocommerce_product:
-			woocommerce_product = frappe.get_doc(
-				{"doctype": "WooCommerce Product", "name": woocommerce_product_name}
-			)
-			woocommerce_product.load_from_db()
+	frappe.flags.in_sync = True
+	sync = None
+	try:
+		# Get ERPNext Item and WooCommerce product if they exist
+		if woocommerce_product or woocommerce_product_name:
+			if not woocommerce_product:
+				woocommerce_product = frappe.get_doc(
+					{"doctype": "WooCommerce Product", "name": woocommerce_product_name}
+				)
+				woocommerce_product.load_from_db()
 
-		# Trigger sync
-		sync = SynchroniseItem(woocommerce_product=woocommerce_product)
-		if enqueue:
-			frappe.enqueue(sync.run)
-		else:
-			sync.run()
-
-	elif item or item_code:
-		if not item:
-			item = frappe.get_doc("Item", item_code)
-		if not item.woocommerce_servers:
-			frappe.throw(_("No WooCommerce Servers defined for Item {0}").format(item_code))
-		for wc_server in item.woocommerce_servers:
-			# Trigger sync for every linked server
-			sync = SynchroniseItem(
-				item=ERPNextItemToSync(item=item, item_woocommerce_server_idx=wc_server.idx)
-			)
+			# Trigger sync
+			sync = SynchroniseItem(woocommerce_product=woocommerce_product, force_push=force_push)
 			if enqueue:
 				frappe.enqueue(sync.run)
 			else:
 				sync.run()
 
-	return (
-		sync.item.item if sync and sync.item else None,
-		sync.woocommerce_product if sync else None,
-	)
+		elif item or item_code:
+			if not item:
+				item = frappe.get_doc("Item", item_code)
+			if not item.woocommerce_servers:
+				frappe.throw(_("No WooCommerce Servers defined for Item {0}").format(item_code))
+			for wc_server in item.woocommerce_servers:
+				if not wc_server.enabled:
+					continue
+				# Trigger sync for enabled linked server
+				sync = SynchroniseItem(
+					item=ERPNextItemToSync(item=item, item_woocommerce_server_idx=wc_server.idx),
+					force_push=force_push,
+				)
+				if enqueue:
+					frappe.enqueue(sync.run)
+				else:
+					sync.run()
+
+		return (
+			sync.item.item if sync and sync.item else None,
+			sync.woocommerce_product if sync else None,
+		)
+	finally:
+		frappe.flags.in_sync = False
 
 
 def sync_woocommerce_products_modified_since(date_time_from=None):
 	"""
-	Get list of WooCommerce products modified since date_time_from
+	Get list of WooCommerce products modified since date_time_from.
+	Only executes if enable_scheduled_item_sync is enabled on at least one WooCommerce Server.
+	Throttles requests and protects with a distributed Redis lock.
 	"""
+	# Check if any enabled WooCommerce Server has scheduled item sync enabled
+	enabled_servers = frappe.get_all(
+		"WooCommerce Server",
+		filters={"enable_sync": 1, "enable_scheduled_item_sync": 1},
+		fields=["name"],
+	)
+	if not enabled_servers:
+		return
+
 	wc_settings = frappe.get_doc("WooCommerce Integration Settings")
 
 	if not date_time_from:
@@ -147,15 +176,26 @@ def sync_woocommerce_products_modified_since(date_time_from=None):
 		)
 		raise ValueError(error_text)
 
-	wc_products = get_list_of_wc_products(date_time_from=date_time_from)
-	for wc_product in wc_products:
-		try:
-			run_item_sync(woocommerce_product=wc_product, enqueue=True)
-		# Skip items with errors, as these exceptions will be logged
-		except Exception:
-			pass
+	lock_name = "wc_scheduled_items_sync"
+	try:
+		with frappe.cache().lock(lock_name, timeout=3600):
+			wc_products = get_list_of_wc_products(date_time_from=date_time_from)
+			for wc_product in wc_products:
+				try:
+					run_item_sync(woocommerce_product=wc_product, enqueue=False)
+					time.sleep(0.5)
+				# Skip items with errors, as these exceptions will be logged
+				except Exception:
+					pass
 
-	frappe.db.set_single_value("WooCommerce Settings", "wc_last_sync_date_items", now())
+			frappe.db.set_single_value("WooCommerce Settings", "wc_last_sync_date_items", now())
+	except Exception as e:
+		if "lock" in str(e).lower():
+			frappe.logger().warning(
+				"WooCommerce scheduled items sync skipped: another sync job is currently in progress."
+			)
+		else:
+			frappe.log_error("WooCommerce Scheduled Items Sync Error", frappe.get_traceback())
 
 
 def format_erpnext_img_url(image_details) -> Optional[str]:
@@ -199,10 +239,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		servers: List[WooCommerceServer | _dict] = None,
 		item: Optional[ERPNextItemToSync] = None,
 		woocommerce_product: Optional[WooCommerceProduct] = None,
+		force_push: bool = False,
 	) -> None:
 		super().__init__(servers)
 		self.item = item
 		self.woocommerce_product = woocommerce_product
+		self.force_push = force_push
 		self.settings = frappe.get_cached_doc("WooCommerce Integration Settings")
 
 	def run(self):
@@ -219,7 +261,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					if isinstance(self.woocommerce_product, WooCommerceProduct)
 					else self.woocommerce_product
 				)
-			except ValidationError as e:
+			except Exception:
 				woocommerce_product_dict = self.woocommerce_product
 			error_message = f"{frappe.get_traceback()}\n\nItem Data: \n{str(self.item) if self.item else ''}\n\nWC Product Data \n{str(woocommerce_product_dict) if self.woocommerce_product else ''})"
 			frappe.log_error("WooCommerce Error", error_message)
@@ -227,8 +269,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 	def get_corresponding_item_or_product(self):
 		"""
-		If we have an ERPNext Item, get the corresponding WooCommerce Product
-		If we have a WooCommerce Product, get the corresponding ERPNext Item
+		If we have an ERPNext Item, get the corresponding WooCommerce Product.
+		Uses direct record load_from_db instead of slow paginated searches that miss variations.
 		"""
 		if (
 			self.item and not self.woocommerce_product and self.item.item_woocommerce_server.woocommerce_id
@@ -240,9 +282,18 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			if not wc_server.enable_sync:
 				raise SyncDisabledError(wc_server)
 
-			wc_products = get_list_of_wc_products(item=self.item)
-			if len(wc_products) == 0:
-				# Clear stale ID and associated sync metadata to trigger recreation / re-linking
+			server_name = self.item.item_woocommerce_server.woocommerce_server
+			wc_id = self.item.item_woocommerce_server.woocommerce_id
+			wc_product_name = generate_woocommerce_record_name_from_domain_and_id(
+				domain=server_name, resource_id=wc_id
+			)
+			wc_product = frappe.get_doc({"doctype": "WooCommerce Product", "name": wc_product_name})
+
+			try:
+				wc_product.load_from_db()
+				self.woocommerce_product = wc_product
+			except Exception:
+				# Clear stale ID and associated sync metadata if product is truly gone on WooCommerce
 				frappe.db.set_value(
 					"Item WooCommerce Server",
 					self.item.item_woocommerce_server.name,
@@ -255,8 +306,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					update_modified=False,
 				)
 				self.item.item_woocommerce_server.woocommerce_id = None
-			else:
-				self.woocommerce_product = wc_products[0]
+				self.woocommerce_product = None
 
 		if self.woocommerce_product and not self.item:
 			self.get_erpnext_item()
@@ -298,7 +348,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 	def sync_wc_product_with_erpnext_item(self):
 		"""
-		Syncronise Item between ERPNext and WooCommerce
+		Synchronise Item between ERPNext and WooCommerce.
+		Supports force_push to immediately push ERPNext changes to WooCommerce.
 		"""
 		if self.item and not self.woocommerce_product:
 			# create missing product in WooCommerce
@@ -307,23 +358,26 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			# create missing item in ERPNext
 			self.create_item(self.woocommerce_product)
 		elif self.item and self.woocommerce_product:
-			# both exist, check sync hash
-			if (
-				self.woocommerce_product.woocommerce_date_modified
-				!= self.item.item_woocommerce_server.woocommerce_last_sync_hash
-			):
-				if get_datetime(self.woocommerce_product.woocommerce_date_modified) > get_datetime(
-					self.item.item.modified
+			if self.force_push:
+				self.update_woocommerce_product(self.woocommerce_product, self.item)
+			else:
+				# both exist, check sync hash
+				if (
+					self.woocommerce_product.woocommerce_date_modified
+					!= self.item.item_woocommerce_server.woocommerce_last_sync_hash
 				):
-					self.update_item(self.woocommerce_product, self.item)
-				if get_datetime(self.woocommerce_product.woocommerce_date_modified) < get_datetime(
-					self.item.item.modified
-				):
-					self.update_woocommerce_product(self.woocommerce_product, self.item)
+					if get_datetime(self.woocommerce_product.woocommerce_date_modified) > get_datetime(
+						self.item.item.modified
+					):
+						self.update_item(self.woocommerce_product, self.item)
+					elif get_datetime(self.woocommerce_product.woocommerce_date_modified) < get_datetime(
+						self.item.item.modified
+					):
+						self.update_woocommerce_product(self.woocommerce_product, self.item)
 
 	def update_item(self, woocommerce_product: WooCommerceProduct, item: ERPNextItemToSync):
 		"""
-		Update the ERPNext Item with fields from it's corresponding WooCommerce Product
+		Update the ERPNext Item with fields from its corresponding WooCommerce Product
 		"""
 		item_dirty = False
 		if item.item.item_name != woocommerce_product.woocommerce_name:
@@ -334,14 +388,16 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		wc_server = frappe.get_cached_doc("WooCommerce Server", woocommerce_product.woocommerce_server)
 		if wc_server.enable_image_sync:
-			wc_product_images = json.loads(woocommerce_product.images)
+			wc_product_images = json.loads(woocommerce_product.images) if woocommerce_product.images else []
 			if len(wc_product_images) > 0:
-				if item.item.image != wc_product_images[0]["src"]:
-					item.item.image = wc_product_images[0]["src"]
+				if item.item.image != wc_product_images[0].get("src"):
+					item.item.image = wc_product_images[0].get("src")
 					item_dirty = True
 
 		if item_dirty or fields_updated:
 			item.item.flags.created_by_sync = True
+			item.item.flags.in_sync = True
+			item.item.flags.ignore_mandatory = True
 			item.item.save()
 
 		self.set_sync_hash()
@@ -350,7 +406,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		self, wc_product: WooCommerceProduct, item: ERPNextItemToSync
 	) -> None:
 		"""
-		Update the WooCommerce Product with fields from it's corresponding ERPNext Item
+		Update the WooCommerce Product with fields from its corresponding ERPNext Item
 		"""
 		wc_product_dirty = False
 
@@ -386,12 +442,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if product_fields_changed:
 			wc_product_dirty = True
 
-		# Image upload: ERPNext → WooCommerce
+		# Image upload: ERPNext -> WooCommerce
 		image_dirty = self._sync_item_image_to_woocommerce(wc_product, item)
 		if image_dirty:
 			wc_product_dirty = True
 
-		if wc_product_dirty:
+		if wc_product_dirty or self.force_push:
 			wc_product.flags.ignore_version = True
 			wc_product.save()
 
@@ -400,7 +456,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 	def create_woocommerce_product(self, item: ERPNextItemToSync) -> None:
 		"""
-		Create the WooCommerce Product with fields from it's corresponding ERPNext Item
+		Create the WooCommerce Product with fields from its corresponding ERPNext Item
 		"""
 		if (
 			item.item_woocommerce_server.woocommerce_server
@@ -478,6 +534,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			item.item.reload()
 			item.item_woocommerce_server.woocommerce_id = wc_product.woocommerce_id
 			item.item.flags.created_by_sync = True
+			item.item.flags.in_sync = True
 			item.item.save()
 
 			# Upload image to WooCommerce after product is created (woocommerce_id is now available)
@@ -532,14 +589,16 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		row.woocommerce_server = wc_server.name
 		item.flags.ignore_mandatory = True
 		item.flags.created_by_sync = True
+		item.flags.in_sync = True
 
 		if wc_server.enable_image_sync:
-			wc_product_images = json.loads(wc_product.images)
+			wc_product_images = json.loads(wc_product.images) if wc_product.images else []
 			if len(wc_product_images) > 0:
 				item.image = wc_product_images[0]["src"]
 
 		modified, item = self.set_item_fields(item=item)
 		item.flags.created_by_sync = True
+		item.flags.in_sync = True
 
 		item.insert()
 
@@ -565,14 +624,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					# Get existing Item Attribute
 					item_attribute = frappe.get_doc("Item Attribute", wc_attribute["name"])
 				else:
-					# Create a Item Attribute
+					# Create an Item Attribute
 					item_attribute = frappe.get_doc(
 						{"doctype": "Item Attribute", "attribute_name": wc_attribute["name"]}
 					)
 
-				# Get list of attribute options.
-				# In variable WooCommerce Products, it's a list with key "options"
-				# In a WooCommerce Product variant, it's a single value with key "option"
+				# Get list of attribute options
 				options = (
 					wc_attribute["options"] if wc_product.type == "variable" else [wc_attribute["option"]]
 				)
@@ -613,12 +670,12 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				for map in wc_server.item_field_map:
 					erpnext_item_field_name = map.erpnext_field_name.split(" | ")
 
-					# We expect woocommerce_field_name to be valid JSONPath
 					jsonpath_expr = parse(map.woocommerce_field_name)
 					woocommerce_product_field_matches = jsonpath_expr.find(woocommerce_product_dict)
 
-					setattr(item, erpnext_item_field_name[0], woocommerce_product_field_matches[0].value)
-					item_dirty = True
+					if woocommerce_product_field_matches:
+						setattr(item, erpnext_item_field_name[0], woocommerce_product_field_matches[0].value)
+						item_dirty = True
 		return item_dirty, item
 
 	def set_product_fields(
@@ -634,45 +691,35 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if item and woocommerce_product:
 			wc_server = frappe.get_cached_doc("WooCommerce Server", woocommerce_product.woocommerce_server)
 			if wc_server.item_field_map:
-
-				# Deserialize the WooCommerce Product's list and dict fields because we want to potentially perform
-				# in-place updates on the whole dict using jsonpath-ng. Use the existing class method for this.
+				wc_dict = woocommerce_product.to_dict()
 				wc_product_with_deserialised_fields = (
-					woocommerce_product.deserialize_attributes_of_type_dict_or_list(woocommerce_product)
+					woocommerce_product.deserialize_attributes_of_type_dict_or_list(wc_dict)
 				)
 
 				for map in wc_server.item_field_map:
 					erpnext_item_field_name = map.erpnext_field_name.split(" | ")
 					erpnext_item_field_value = getattr(item.item, erpnext_item_field_name[0])
 
-					# We expect woocommerce_field_name to be valid JSONPath
 					jsonpath_expr = parse(map.woocommerce_field_name)
 					woocommerce_product_field_matches = jsonpath_expr.find(wc_product_with_deserialised_fields)
 
-					if len(woocommerce_product_field_matches) == 0:
-						if woocommerce_product.name:
-							# We're strict about existing WooCommerce Products, the field should exist
-							raise ValueError(
-								_("Field <code>{0}</code> not found in WooCommerce Product {1}").format(
-									map.woocommerce_field_name, woocommerce_product.name
-								)
-							)
-						else:
-							# For new WooCommerce Products, the nested field may not exist yet, so don't stop the sync
-							continue
-
-					# JSONPath parsing typically returns a list, we'll only take the first value
-					woocommerce_product_field_value = woocommerce_product_field_matches[0].value
-
-					if erpnext_item_field_value != woocommerce_product_field_value:
-						jsonpath_expr.update(wc_product_with_deserialised_fields, erpnext_item_field_value)
+					if (
+						not woocommerce_product_field_matches
+						or woocommerce_product_field_matches[0].value != erpnext_item_field_value
+					):
+						jsonpath_expr.update_or_create(
+							wc_product_with_deserialised_fields, erpnext_item_field_value
+						)
 						wc_product_dirty = True
 
-				# Re-serialize the WooCommerce Product's list and dict fields, because we deserialized earlier
-				woocommerce_product = woocommerce_product.serialize_attributes_of_type_dict_or_list(
-					wc_product_with_deserialised_fields
-				)
+				if wc_product_dirty:
+					serialized_dict = woocommerce_product.serialize_attributes_of_type_dict_or_list(
+						wc_product_with_deserialised_fields
+					)
+					for k, v in serialized_dict.items():
+						woocommerce_product.set(k, v)
 
+		woocommerce_product.serialize_attributes_of_type_dict_or_list(woocommerce_product)
 		return wc_product_dirty, woocommerce_product
 
 	def _sync_item_image_to_woocommerce(
@@ -680,13 +727,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 	) -> bool:
 		"""
 		Upload or update the ERPNext Item image to WooCommerce via the woo-media-api plugin.
-
-		Returns True if the WooCommerce product's images field was updated (caller should save).
-
-		Duplicate-prevention strategy:
-		  - Track the last uploaded ERPNext image URL in Item WooCommerce Server.woocommerce_last_image_url
-		  - Skip the upload entirely when the URL is unchanged → no duplicate Media Library entry
-		  - When the image changes, upload the new image, then delete the old WooCommerce media entry
+		Returns True if the WooCommerce product's images field was updated.
 		"""
 		wc_server = frappe.get_cached_doc("WooCommerce Server", wc_product.woocommerce_server)
 
@@ -708,12 +749,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if not image_url:
 			return False
 
-		# Check if this image URL was already successfully uploaded — if so, skip to avoid duplicates
+		# Skip upload if the image URL has not changed
 		last_image_url = item.item_woocommerce_server.get("woocommerce_last_image_url")
 		if last_image_url and last_image_url == image_url:
 			return False
 
-		# Image has changed (or was never uploaded) — upload it now
 		old_image_id = item.item_woocommerce_server.get("woocommerce_image_id") or None
 		media_response = self.handle_media_update(
 			wc_server=wc_server,
@@ -727,9 +767,6 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if not media_response or not media_response.get("id"):
 			return False
 
-		# Update product images array with the new media entry
-		# Store ID as integer — WooCommerce expects attachment IDs as integers
-		# and the before_db_update hook sends ID-only objects to avoid duplicate downloads
 		new_image_id = int(media_response["id"])
 		wc_product.images = json.dumps(
 			[
@@ -742,7 +779,6 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			]
 		)
 
-		# Persist the uploaded image ID and URL so future syncs can skip re-upload
 		frappe.db.set_value(
 			"Item WooCommerce Server",
 			item.item_woocommerce_server.name,
@@ -766,9 +802,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 	) -> Optional[dict]:
 		"""
 		Upload a new image to the WooCommerce Media Library via the woo-media-api plugin,
-		optionally deleting the previously uploaded image to keep the library clean.
-
-		Returns a normalised dict with keys: id, src, name, alt — or None on failure.
+		optionally deleting the previously uploaded image.
 		"""
 		wc_api = APIWithRequestLogging(
 			url=wc_server.woocommerce_server_url,
@@ -790,12 +824,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			response.raise_for_status()
 			media_response = response.json()
 
-			# Delete old media entry *after* new one is confirmed, keeping library clean
 			if old_image_id:
 				try:
 					wc_api.delete(f"media/{old_image_id}")
 				except Exception:
-					# Non-fatal: log but continue — the new image was already uploaded
 					frappe.log_error(
 						f"WooCommerce Media: failed to delete old media ID {old_image_id}",
 						title="WooCommerce Media Cleanup",
@@ -815,8 +847,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 	def set_sync_hash(self):
 		"""
-		Set the last sync hash value using db.set_value, as it does not call the ORM triggers
-		and it does not update the modified timestamp (by using the update_modified parameter)
+		Set the last sync hash value using db.set_value without ORM triggers
 		"""
 		frappe.db.set_value(
 			"Item WooCommerce Server",
@@ -826,8 +857,6 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			update_modified=False,
 		)
 
-		# If item was synchronised but the item is set not to sync, turn on the enabled flag
-		# Items that are disabled for sync will still be synced if it is ordered on WooCommerce
 		frappe.db.set_value(
 			"Item WooCommerce Server",
 			self.item.item_woocommerce_server.name,
@@ -841,9 +870,7 @@ def get_list_of_wc_products(
 	item: Optional[ERPNextItemToSync] = None, date_time_from: Optional[datetime] = None
 ) -> List[WooCommerceProduct]:
 	"""
-	Fetches a list of WooCommerce Products within a specified date range or linked with an Item, using pagination.
-
-	At least one of date_time_from, item parameters are required
+	Fetches a list of WooCommerce Products within a specified date range or linked with an Item.
 	"""
 	if not any([date_time_from, item]):
 		raise ValueError("At least one of date_time_from or item parameters are required")
@@ -856,7 +883,6 @@ def get_list_of_wc_products(
 	wc_products = []
 	servers = None
 
-	# Build filters
 	if date_time_from:
 		filters.append(["WooCommerce Product", "date_modified", ">", date_time_from])
 	if item:
@@ -868,7 +894,7 @@ def get_list_of_wc_products(
 		new_results = woocommerce_product.get_list(
 			args={
 				"filters": filters,
-				"page_lenth": page_length,
+				"page_length": page_length,
 				"start": start,
 				"servers": servers,
 				"as_doc": True,
@@ -887,7 +913,6 @@ def get_item_price_rate(item: ERPNextItemToSync):
 	"""
 	Get the Item Price if Item Price sync is enabled
 	"""
-	# Check if the Item Price sync is enabled
 	wc_server = frappe.get_cached_doc(
 		"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
 	)
@@ -916,24 +941,22 @@ def get_item_price_rate(item: ERPNextItemToSync):
 
 def clear_sync_hash_and_run_item_sync(item_code: str):
 	"""
-	Clear the last sync hash value using db.set_value, as it does not call the ORM triggers
-	and it does not update the modified timestamp (by using the update_modified parameter)
+	Clear the last sync hash value and trigger a targeted push to WooCommerce
 	"""
-
 	iws = frappe.qb.DocType("Item WooCommerce Server")
 
 	iwss = (
 		frappe.qb.from_(iws).where(iws.enabled == 1).where(iws.parent == item_code).select(iws.name)
 	).run(as_dict=True)
 
-	for iws in iwss:
+	for row in iwss:
 		frappe.db.set_value(
 			"Item WooCommerce Server",
-			iws.name,
+			row.name,
 			"woocommerce_last_sync_hash",
 			None,
 			update_modified=False,
 		)
 
 	if len(iwss) > 0:
-		run_item_sync(item_code=item_code, enqueue=True)
+		run_item_sync(item_code=item_code, force_push=True, enqueue=False)

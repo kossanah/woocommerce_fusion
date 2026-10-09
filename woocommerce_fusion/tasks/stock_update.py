@@ -10,6 +10,8 @@ verify_ssl = not frappe._dev_server
 
 
 def update_stock_levels_for_woocommerce_item(doc, method):
+	if frappe.flags.in_test or getattr(frappe.flags, "in_sync", False):
+		return
 	if not frappe.flags.in_test:
 		if doc.doctype in ("Stock Entry", "Stock Reconciliation", "Sales Invoice", "Delivery Note"):
 			# Check if there are any enabled WooCommerce Servers with stock sync enabled
@@ -37,6 +39,14 @@ def update_stock_levels_for_all_enabled_items_in_background():
 	"""
 	Get all enabled ERPNext Items and post stock updates to WooCommerce
 	"""
+	servers = frappe.get_all(
+		"WooCommerce Server",
+		filters={"enable_sync": 1, "enable_stock_level_synchronisation": 1, "enable_scheduled_stock_sync": 1},
+		fields=["name"],
+	)
+	if not servers:
+		return
+
 	erpnext_items = []
 	current_page_length = 500
 	start = 0
