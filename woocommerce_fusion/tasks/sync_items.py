@@ -627,9 +627,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				wc_product.woocommerce_server, wc_product.parent_id
 			)
 			parent_item, parent_wc_product = run_item_sync(
-				woocommerce_product_name=woocommerce_product_name
+				woocommerce_product_name=woocommerce_product_name, enqueue=False
 			)
-			item.variant_of = parent_item.item_code
+			if parent_item:
+				item.variant_of = parent_item.item_code
 
 		item.item_code = (
 			wc_product.sku
@@ -670,41 +671,52 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 	def create_or_update_item_attributes(self, wc_product: WooCommerceProduct):
 		"""
-		Create or update an Item Attribute
+		Create or update an Item Attribute.
+		Appends missing attribute values to the master without removing existing ones,
+		preventing InvalidItemAttributeValueError when values are used by other items.
 		"""
-		if wc_product.attributes:
-			wc_attributes = json.loads(wc_product.attributes)
-			for wc_attribute in wc_attributes:
-				if frappe.db.exists("Item Attribute", wc_attribute["name"]):
-					# Get existing Item Attribute
-					item_attribute = frappe.get_doc("Item Attribute", wc_attribute["name"])
-				else:
-					# Create an Item Attribute
-					item_attribute = frappe.get_doc(
-						{"doctype": "Item Attribute", "attribute_name": wc_attribute["name"]}
-					)
+		if not wc_product.attributes:
+			return
 
-				# Get list of attribute options
-				options = (
-					wc_attribute["options"] if wc_product.type == "variable" else [wc_attribute["option"]]
+		wc_attributes = (
+			json.loads(wc_product.attributes)
+			if isinstance(wc_product.attributes, str)
+			else wc_product.attributes
+		)
+		for wc_attribute in wc_attributes:
+			attr_name = wc_attribute.get("name")
+			if not attr_name:
+				continue
+
+			if frappe.db.exists("Item Attribute", attr_name):
+				item_attribute = frappe.get_doc("Item Attribute", attr_name)
+			else:
+				item_attribute = frappe.get_doc(
+					{"doctype": "Item Attribute", "attribute_name": attr_name}
 				)
 
-				# If no attributes values exist, or attribute values exist already but are different, remove and update them
-				if len(item_attribute.item_attribute_values) == 0 or (
-					len(item_attribute.item_attribute_values) > 0
-					and set(options) != set([val.attribute_value for val in item_attribute.item_attribute_values])
-				):
-					item_attribute.item_attribute_values = []
-					for option in options:
-						row = item_attribute.append("item_attribute_values")
-						row.attribute_value = option
-						row.abbr = option.replace(" ", "")
+			# Get list of attribute options
+			if wc_product.type == "variable":
+				options = wc_attribute.get("options", [])
+			else:
+				opt = wc_attribute.get("option")
+				options = [opt] if opt else []
 
-				item_attribute.flags.ignore_mandatory = True
-				if not item_attribute.name:
-					item_attribute.insert()
-				else:
-					item_attribute.save()
+			existing_values = {val.attribute_value for val in item_attribute.item_attribute_values}
+			dirty = False
+			for option in options:
+				if option and option not in existing_values:
+					row = item_attribute.append("item_attribute_values")
+					row.attribute_value = option
+					row.abbr = str(option).replace(" ", "")
+					existing_values.add(option)
+					dirty = True
+
+			item_attribute.flags.ignore_mandatory = True
+			if not frappe.db.exists("Item Attribute", attr_name):
+				item_attribute.insert()
+			elif dirty:
+				item_attribute.save()
 
 	def set_item_fields(self, item: Item) -> Tuple[bool, Item]:
 		"""
