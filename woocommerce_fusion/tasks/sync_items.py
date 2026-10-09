@@ -435,6 +435,22 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					wc_product.status = wc_server.new_product_publish_status or "publish"
 					wc_product_dirty = True
 
+				# Update regular price if price sync is enabled and pricing has changed
+				wc_server = frappe.get_cached_doc(
+					"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
+				)
+				if wc_server.enable_price_list_sync and pricing is not None:
+					try:
+						current_price = float(wc_product.regular_price or 0)
+						new_price = float(pricing)
+						if current_price != new_price:
+							wc_product.regular_price = str(pricing)
+							wc_product_dirty = True
+					except (ValueError, TypeError):
+						if str(wc_product.regular_price) != str(pricing):
+							wc_product.regular_price = str(pricing)
+							wc_product_dirty = True
+
 		# Update properties
 		if wc_product.woocommerce_name != item.item.item_name:
 			wc_product.woocommerce_name = item.item.item_name

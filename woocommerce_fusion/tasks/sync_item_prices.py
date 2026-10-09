@@ -224,17 +224,36 @@ class SynchroniseItemPrice(SynchroniseWooCommerce):
 			for i in range(0, len(variations), batch_size):
 				chunk = variations[i : i + batch_size]
 				payload = {"update": chunk}
+				failed_items = []
 				try:
 					res = wc_api.post(f"products/{parent_id}/variations/batch", data=payload)
-					if res.status_code != 200:
-						# Fallback to simple products batch if parent endpoint rejects
-						res_fallback = wc_api.post("products/batch", data=payload)
+					if res.status_code == 200:
+						res_data = res.json() if hasattr(res, "json") else {}
+						for item_res in res_data.get("update", []):
+							if "error" in item_res:
+								err_code = item_res.get("error", {}).get("code", "")
+								if "invalid_id" in err_code or "not_found" in err_code:
+									err_id = item_res.get("id")
+									matching = next((c for c in chunk if c.get("id") == err_id), None)
+									if matching:
+										failed_items.append(matching)
+					else:
+						failed_items = chunk
+				except Exception:
+					frappe.log_error("WooCommerce Variation Price Batch Exception", frappe.get_traceback())
+					failed_items = chunk
+
+				if failed_items:
+					# Fallback to simple products batch if parent endpoint rejects or item is not a variation
+					try:
+						res_fallback = wc_api.post("products/batch", data={"update": failed_items})
 						if res_fallback.status_code != 200:
 							frappe.log_error(
 								"WooCommerce Variation Price Batch Error",
-								f"Parent {parent_id}, Status {res.status_code}: {res.text[:500]}",
+								f"Parent {parent_id}, Status {res_fallback.status_code}: {res_fallback.text[:500]}",
 							)
-				except Exception:
-					frappe.log_error("WooCommerce Variation Price Batch Exception", frappe.get_traceback())
+					except Exception:
+						frappe.log_error("WooCommerce Variation Price Fallback Exception", frappe.get_traceback())
+
 				if batch_delay > 0:
 					time.sleep(batch_delay)
