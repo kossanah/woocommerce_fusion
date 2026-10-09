@@ -745,23 +745,55 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if not image_details:
 			return False
 
+		file_name, file_url, is_private, content_hash, modified = image_details
 		image_url = format_erpnext_img_url(image_details)
 		if not image_url:
 			return False
 
-		# Skip upload if the image URL has not changed
-		last_image_url = item.item_woocommerce_server.get("woocommerce_last_image_url")
-		if last_image_url and last_image_url == image_url:
-			return False
+		current_image_id = item.item_woocommerce_server.get("woocommerce_image_id") or None
+		last_image_url = item.item_woocommerce_server.get("woocommerce_last_image_url") or None
+		last_image_hash = item.item_woocommerce_server.get("woocommerce_image_hash") or None
 
-		old_image_id = item.item_woocommerce_server.get("woocommerce_image_id") or None
+		# 1. Skip upload if image has already been synced and content has not changed
+		if current_image_id:
+			if last_image_hash and content_hash and str(last_image_hash) == str(content_hash):
+				return False
+			if not last_image_hash and last_image_url and last_image_url == image_url:
+				return False
+
+		# 2. Attachment Discovery: If ERPNext has no image_id recorded yet, check if
+		# WooCommerce product already has an image attached with matching name or file
+		if not current_image_id and wc_product.images:
+			existing_wc_images = json.loads(wc_product.images) if isinstance(wc_product.images, str) else wc_product.images
+			if existing_wc_images and isinstance(existing_wc_images, list) and len(existing_wc_images) > 0:
+				first_img = existing_wc_images[0]
+				if isinstance(first_img, dict) and first_img.get("id"):
+					wc_img_name = str(first_img.get("name", "")).lower()
+					wc_img_src = str(first_img.get("src", "")).lower()
+					clean_file_base = file_name.rsplit(".", 1)[0].lower()
+					if clean_file_base in wc_img_name or clean_file_base in wc_img_src:
+						# Same image already on WooCommerce: adopt existing ID
+						existing_id = int(first_img["id"])
+						self._update_item_wc_image_meta(
+							item.item_woocommerce_server.name,
+							existing_id,
+							image_url,
+							content_hash,
+						)
+						return False
+					else:
+						# Different image: mark existing ID as old_image_id for safe cleanup
+						current_image_id = str(first_img["id"])
+
+		# 3. Upload or update image via woo-media-api with content hash
 		media_response = self.handle_media_update(
 			wc_server=wc_server,
 			wc_product=wc_product,
 			image_url=image_url,
-			title=image_details[0],
+			title=file_name,
 			alt_text=item.item.item_name,
-			old_image_id=old_image_id,
+			old_image_id=current_image_id,
+			content_hash=content_hash,
 		)
 
 		if not media_response or not media_response.get("id"):
@@ -773,23 +805,38 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				{
 					"id": new_image_id,
 					"src": media_response.get("src", ""),
-					"name": media_response.get("name", image_details[0]),
+					"name": media_response.get("name", file_name),
 					"alt": media_response.get("alt", item.item.item_name),
 				}
 			]
 		)
 
-		frappe.db.set_value(
-			"Item WooCommerce Server",
+		self._update_item_wc_image_meta(
 			item.item_woocommerce_server.name,
-			{
-				"woocommerce_image_id": str(media_response["id"]),
-				"woocommerce_last_image_url": image_url,
-			},
-			update_modified=False,
+			new_image_id,
+			image_url,
+			content_hash,
 		)
 
 		return True
+
+	def _update_item_wc_image_meta(
+		self, item_wc_server_name: str, image_id: int, image_url: str, content_hash: Optional[str]
+	):
+		update_values = {
+			"woocommerce_image_id": str(image_id),
+			"woocommerce_last_image_url": image_url,
+		}
+		columns = frappe.db.get_table_columns("Item WooCommerce Server")
+		if "woocommerce_image_hash" in columns and content_hash:
+			update_values["woocommerce_image_hash"] = content_hash
+
+		frappe.db.set_value(
+			"Item WooCommerce Server",
+			item_wc_server_name,
+			update_values,
+			update_modified=False,
+		)
 
 	def handle_media_update(
 		self,
@@ -799,10 +846,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		title: str,
 		alt_text: str,
 		old_image_id: Optional[str] = None,
+		content_hash: Optional[str] = None,
 	) -> Optional[dict]:
 		"""
 		Upload a new image to the WooCommerce Media Library via the woo-media-api plugin,
-		optionally deleting the previously uploaded image.
+		safely requesting cleanup of the old image if replaced.
 		"""
 		wc_api = APIWithRequestLogging(
 			url=wc_server.woocommerce_server_url,
@@ -818,23 +866,28 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			"alt_text": alt_text,
 			"post": wc_product.woocommerce_id,
 		}
+		if content_hash:
+			media_data["content_hash"] = content_hash
 
 		try:
 			response = wc_api.post("media", data=media_data)
 			response.raise_for_status()
 			media_response = response.json()
 
-			if old_image_id:
+			new_id = str(media_response.get("ID") or media_response.get("id"))
+
+			# Only delete old_image_id if it differs from the new ID
+			if old_image_id and str(old_image_id) != str(new_id):
 				try:
 					wc_api.delete(f"media/{old_image_id}")
 				except Exception:
 					frappe.log_error(
-						f"WooCommerce Media: failed to delete old media ID {old_image_id}",
+						f"WooCommerce Media: cleanup request for old media ID {old_image_id}",
 						title="WooCommerce Media Cleanup",
 					)
 
 			return {
-				"id": str(media_response["ID"]),
+				"id": new_id,
 				"src": media_response.get("guid", image_url),
 				"name": media_response.get("post_title", title),
 				"alt": media_response.get("post_excerpt") or alt_text,

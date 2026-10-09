@@ -12,7 +12,8 @@
   "view_product",
   "woocommerce_last_sync_hash",
   "woocommerce_image_id",
-  "woocommerce_last_image_url"
+  "woocommerce_last_image_url",
+  "woocommerce_image_hash"
  ],
  "fields": [
   {
@@ -62,6 +63,14 @@
    "read_only": 1,
    "hidden": 1,
    "description": "ERPNext image URL that was last successfully uploaded to WooCommerce (used to detect changes)"
+  },
+  {
+   "fieldname": "woocommerce_image_hash",
+   "fieldtype": "Data",
+   "label": "Last Synced Image Hash",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Content hash of the ERPNext file last synced to WooCommerce"
   }
  ],
  "index_web_pages_for_search": 1,

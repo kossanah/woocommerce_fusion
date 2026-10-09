@@ -135,8 +135,9 @@ class WooCommerceProduct(WooCommerceResource):
 						# If ID is not a valid integer, keep the full image dict
 						id_only_images.append(img)
 				else:
-					# No ID available (e.g. brand-new image via URL) — keep as-is
-					id_only_images.append(img)
+					# No ID available: omit raw src during PUT updates to prevent
+					# WooCommerce from auto-downloading duplicates
+					pass
 
 			product["images"] = id_only_images
 
