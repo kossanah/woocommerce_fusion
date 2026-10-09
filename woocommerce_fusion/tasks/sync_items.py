@@ -266,6 +266,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		try:
 			self.get_corresponding_item_or_product()
 			self.sync_wc_product_with_erpnext_item()
+		except SyncDisabledError:
+			return
 		except Exception as err:
 			try:
 				woocommerce_product_dict = (
@@ -474,6 +476,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product.woocommerce_name = item.item.item_name
 			wc_product_dirty = True
 
+		if item.item.item_code and getattr(wc_product, "sku", None) != item.item.item_code:
+			wc_product.sku = item.item.item_code
+			wc_product_dirty = True
+
 		product_fields_changed, wc_product = self.set_product_fields(wc_product, item)
 		if product_fields_changed:
 			wc_product_dirty = True
@@ -555,6 +561,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product.woocommerce_server = item.item_woocommerce_server.woocommerce_server
 			wc_product.woocommerce_name = item.item.item_name
 			wc_product.regular_price = get_item_price_rate(item) or "0"
+			wc_product.sku = item.item.item_code
 
 			wc_server = frappe.get_cached_doc(
 				"WooCommerce Server", item.item_woocommerce_server.woocommerce_server
