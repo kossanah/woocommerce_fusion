@@ -32,6 +32,7 @@ class WooCommerceAPI:
 
 class WooCommerceResource(Document):
 
+	_doc_before_save = None
 	wc_api_list: Optional[List[WooCommerceAPI]] = None
 	current_wc_api: Optional[WooCommerceAPI] = None
 
@@ -162,10 +163,12 @@ class WooCommerceResource(Document):
 		"""
 		if not hasattr(self, "_action"):
 			self._action = "save"
+		if not hasattr(self, "_doc_before_save"):
+			self._doc_before_save = None
 
 	def load_doc_before_save(self, *args, **kwargs):
-		# Retain _doc_before_save captured during load_from_db
-		pass
+		if not hasattr(self, "_doc_before_save"):
+			self._doc_before_save = None
 
 	def validate(self):
 		self.serialize_attributes_of_type_dict_or_list(self)
