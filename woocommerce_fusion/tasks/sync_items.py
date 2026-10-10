@@ -918,7 +918,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				if has_image_assigned:
 					return False
 
-				if isinstance(wc_images, list) and not has_image_assigned:
+				if isinstance(wc_images, list) and not has_image_assigned and current_int_id:
 					wc_product.images = json.dumps([{"id": current_int_id}])
 					return True
 
