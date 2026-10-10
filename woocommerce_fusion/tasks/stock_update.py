@@ -31,6 +31,8 @@ def update_stock_levels_for_woocommerce_item(doc, method):
 					frappe.enqueue(
 						"woocommerce_fusion.tasks.stock_update.update_stock_levels_on_woocommerce_site_multiple",
 						enqueue_after_commit=True,
+						job_id=f"stock_update_doc::{doc.doctype}::{doc.name}",
+						deduplicate=True,
 						item_codes=list(set(item_codes)),
 					)
 
@@ -70,6 +72,8 @@ def update_stock_levels_for_all_enabled_items_in_background():
 			"woocommerce_fusion.tasks.stock_update.update_stock_levels_on_woocommerce_site_multiple",
 			item_codes=item_codes,
 			queue="long",
+			job_id="scheduled_stock_update_all_items",
+			deduplicate=True,
 		)
 
 

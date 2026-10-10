@@ -89,6 +89,8 @@ def run_item_sync_from_hook(doc, method):
 		frappe.enqueue(
 			clear_sync_hash_and_run_item_sync,
 			item_code=doc.name,
+			job_id=f"sync_item::{doc.name}",
+			deduplicate=True,
 			enqueue_after_commit=True,
 		)
 
@@ -126,7 +128,11 @@ def run_item_sync(
 			# Trigger sync
 			sync = SynchroniseItem(woocommerce_product=woocommerce_product, force_push=force_push)
 			if enqueue:
-				frappe.enqueue(sync.run)
+				frappe.enqueue(
+					sync.run,
+					job_id=f"sync_wc_product::{woocommerce_product.name}",
+					deduplicate=True,
+				)
 			else:
 				sync.run()
 
@@ -144,7 +150,11 @@ def run_item_sync(
 					force_push=force_push,
 				)
 				if enqueue:
-					frappe.enqueue(sync.run)
+					frappe.enqueue(
+						sync.run,
+						job_id=f"sync_item_run::{item.name}",
+						deduplicate=True,
+					)
 				else:
 					sync.run()
 

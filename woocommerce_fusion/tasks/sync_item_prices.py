@@ -20,6 +20,8 @@ def update_item_price_for_woocommerce_item_from_hook(doc, method):
 			frappe.enqueue(
 				"woocommerce_fusion.tasks.sync_item_prices.run_item_price_sync",
 				enqueue_after_commit=True,
+				job_id=f"sync_item_price::{doc.item_code}",
+				deduplicate=True,
 				item_code=doc.item_code,
 				item_price_doc=doc,
 			)
@@ -34,7 +36,13 @@ def run_item_price_sync_in_background():
 	)
 	if not servers:
 		return
-	frappe.enqueue(run_item_price_sync, queue="long", timeout=3600)
+	frappe.enqueue(
+		run_item_price_sync,
+		queue="long",
+		timeout=3600,
+		job_id="scheduled_item_price_sync",
+		deduplicate=True,
+	)
 
 
 @frappe.whitelist()
