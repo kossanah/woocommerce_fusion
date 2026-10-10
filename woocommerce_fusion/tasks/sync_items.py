@@ -891,9 +891,37 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		# 1. Skip upload if image has already been synced and content has not changed
 		if current_image_id:
+			image_unchanged = False
 			if last_image_hash and content_hash and str(last_image_hash) == str(content_hash):
-				return False
-			if not last_image_hash and last_image_url and last_image_url == image_url:
+				image_unchanged = True
+			elif not last_image_hash and last_image_url and last_image_url == image_url:
+				image_unchanged = True
+
+			if image_unchanged:
+				# Ensure that the existing image is actually assigned to the WooCommerce product.
+				# If WooCommerce product has no image or lost its featured image, re-assign current_image_id.
+				current_int_id = safe_int(current_image_id)
+				wc_images = getattr(wc_product, "images", None)
+				if isinstance(wc_images, str) and wc_images:
+					try:
+						wc_images = json.loads(wc_images)
+					except Exception:
+						wc_images = []
+
+				has_image_assigned = False
+				if isinstance(wc_images, list):
+					for img in wc_images:
+						if isinstance(img, dict) and safe_int(img.get("id")) == current_int_id:
+							has_image_assigned = True
+							break
+
+				if has_image_assigned:
+					return False
+
+				if isinstance(wc_images, list) and not has_image_assigned:
+					wc_product.images = json.dumps([{"id": current_int_id}])
+					return True
+
 				return False
 
 		# 2. Attachment Discovery: If ERPNext has no image_id recorded yet, check if
