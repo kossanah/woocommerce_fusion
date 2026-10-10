@@ -306,8 +306,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			try:
 				wc_product.load_from_db()
 				self.woocommerce_product = wc_product
-			except Exception:
-				# Clear stale ID and associated sync metadata if product is truly gone on WooCommerce
+			except frappe.DoesNotExistError:
+				# Clear stale ID and associated sync metadata ONLY if product is truly gone on WooCommerce (404)
 				frappe.db.set_value(
 					"Item WooCommerce Server",
 					self.item.item_woocommerce_server.name,
@@ -321,6 +321,56 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				)
 				self.item.item_woocommerce_server.woocommerce_id = None
 				self.woocommerce_product = None
+
+		elif (
+			self.item
+			and not self.woocommerce_product
+			and not self.item.item_woocommerce_server.woocommerce_id
+			and self.item.item.item_code
+		):
+			wc_server = frappe.get_cached_doc(
+				"WooCommerce Server", self.item.item_woocommerce_server.woocommerce_server
+			)
+			if wc_server.enable_sync:
+				# Before attempting to create a new product, check if a product with this SKU already exists on WooCommerce
+				sku = self.item.item.item_code
+				server_name = self.item.item_woocommerce_server.woocommerce_server
+				try:
+					wc_api = APIWithRequestLogging(
+						url=wc_server.woocommerce_server_url,
+						consumer_key=wc_server.api_consumer_key,
+						consumer_secret=wc_server.api_consumer_secret,
+						version="wc/v3",
+						timeout=40,
+					)
+					res = wc_api.get("products", params={"sku": sku})
+					if res.status_code == 200:
+						matching_products = res.json()
+						if isinstance(matching_products, list) and len(matching_products) > 0:
+							found_wc_id = str(matching_products[0]["id"])
+							wc_product_name = generate_woocommerce_record_name_from_domain_and_id(
+								domain=server_name, resource_id=found_wc_id
+							)
+							wc_product = frappe.get_doc(
+								{"doctype": "WooCommerce Product", "name": wc_product_name}
+							)
+							wc_product.load_from_db()
+							self.woocommerce_product = wc_product
+							frappe.db.set_value(
+								"Item WooCommerce Server",
+								self.item.item_woocommerce_server.name,
+								"woocommerce_id",
+								found_wc_id,
+								update_modified=False,
+							)
+							self.item.item_woocommerce_server.woocommerce_id = found_wc_id
+							frappe.logger("woocommerce_fusion").info(
+								f"Found existing WooCommerce product #{found_wc_id} by SKU '{sku}' for Item '{self.item.item.name}'"
+							)
+				except Exception as sku_err:
+					frappe.logger("woocommerce_fusion").warning(
+						f"SKU pre-lookup failed for Item '{self.item.item.name}': {sku_err}"
+					)
 
 		if self.woocommerce_product and not self.item:
 			self.get_erpnext_item()
@@ -491,6 +541,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 
 		if wc_product_dirty or getattr(self, "force_push", False):
 			wc_product.flags.ignore_version = True
+			wc_product.flags.force_push = getattr(self, "force_push", False)
 			wc_product.save()
 
 		self.woocommerce_product = wc_product
@@ -578,7 +629,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				)
 			self.woocommerce_product = wc_product
 
-			# Reload ERPNext Item
+			# Reload ERPNext Item and guarantee woocommerce_id persistence
+			frappe.db.set_value(
+				"Item WooCommerce Server",
+				item.item_woocommerce_server.name,
+				"woocommerce_id",
+				str(wc_product.woocommerce_id),
+				update_modified=False,
+			)
 			item.item.reload()
 			item.item_woocommerce_server.woocommerce_id = str(wc_product.woocommerce_id)
 			item.item.flags.created_by_sync = True

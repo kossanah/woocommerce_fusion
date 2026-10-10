@@ -151,7 +151,10 @@ class WooCommerceResource(Document):
 
 	def call_super_init(self, record: Dict):
 		super(Document, self).__init__(record)
-		self._doc_before_save = None
+		try:
+			self._doc_before_save = frappe.copy_doc(self)
+		except Exception:
+			self._doc_before_save = None
 
 	def check_if_latest(self):
 		"""
@@ -159,11 +162,10 @@ class WooCommerceResource(Document):
 		"""
 		if not hasattr(self, "_action"):
 			self._action = "save"
-		if not hasattr(self, "_doc_before_save"):
-			self._doc_before_save = None
 
 	def load_doc_before_save(self, *args, **kwargs):
-		self._doc_before_save = None
+		# Retain _doc_before_save captured during load_from_db
+		pass
 
 	def validate(self):
 		self.serialize_attributes_of_type_dict_or_list(self)
@@ -348,7 +350,69 @@ class WooCommerceResource(Document):
 		except Exception as err:
 			log_and_raise_error(err, error_text="db_insert failed")
 		if response.status_code != 201:
-			log_and_raise_error(error_text="db_insert failed", response=response)
+			if response.status_code == 400:
+				# 1. Duplicate SKU recovery
+				try:
+					res_json = response.json()
+					if res_json.get("code") == "product_invalid_sku":
+						existing_id = res_json.get("data", {}).get("resource_id")
+						if existing_id:
+							get_resp = self.current_wc_api.api.get(f"{self.resource}/{existing_id}")
+							if get_resp.status_code == 200:
+								existing_record = get_resp.json()
+								self.woocommerce_id = existing_record["id"]
+								self.woocommerce_date_modified = existing_record.get("date_modified")
+								wc_server_domain = parse_domain_from_url(self.current_wc_api.woocommerce_server_url)
+								self.woocommerce_server = wc_server_domain
+								self.name = generate_woocommerce_record_name_from_domain_and_id(
+									domain=wc_server_domain, resource_id=self.woocommerce_id
+								)
+								existing_record = self.pre_init_document(
+									existing_record, woocommerce_server_url=self.current_wc_api.woocommerce_server_url
+								)
+								self.update(existing_record)
+								try:
+									self._doc_before_save = frappe.copy_doc(self)
+								except Exception:
+									pass
+								frappe.logger("woocommerce_fusion").info(
+									f"Linked duplicate SKU '{record.get('sku')}' to existing WooCommerce {self.resource} #{existing_id}"
+								)
+								return
+				except Exception as recovery_err:
+					frappe.logger("woocommerce_fusion").warning(
+						f"Failed to recover existing WooCommerce product for duplicate SKU: {recovery_err}"
+					)
+
+				# 2. Invalid image ID recovery
+				if "images" in record:
+					try:
+						res_json = response.json()
+						if res_json.get("code") == "woocommerce_product_invalid_image_id":
+							import re
+							invalid_match = re.search(r"#(\d+) is an invalid image ID", res_json.get("message", ""))
+							invalid_id = invalid_match.group(1) if invalid_match else None
+							if isinstance(record.get("images"), list):
+								if invalid_id:
+									record["images"] = [
+										img for img in record["images"]
+										if not (isinstance(img, dict) and str(img.get("id")) == invalid_id)
+									]
+								else:
+									record["images"] = []
+							else:
+								record.pop("images", None)
+
+							frappe.logger("woocommerce_fusion").warning(
+								f"Removed invalid image ID {invalid_id} during db_insert and retrying"
+							)
+							response = self.current_wc_api.api.post(endpoint, data=record)
+					except Exception:
+						pass
+
+			if response.status_code != 201:
+				log_and_raise_error(error_text="db_insert failed", response=response)
+
 		self.woocommerce_id = response.json()["id"]
 		self.woocommerce_date_modified = response.json()["date_modified"]
 		wc_server_domain = parse_domain_from_url(self.current_wc_api.woocommerce_server_url)
@@ -356,6 +420,10 @@ class WooCommerceResource(Document):
 		self.name = generate_woocommerce_record_name_from_domain_and_id(
 			domain=wc_server_domain, resource_id=self.woocommerce_id
 		)
+		try:
+			self._doc_before_save = frappe.copy_doc(self)
+		except Exception:
+			pass
 
 	def before_db_insert(self, record: Dict):
 		return record
@@ -375,12 +443,12 @@ class WooCommerceResource(Document):
 		record = self.before_db_update(record)
 
 		# Drop fields with values that are unchanged
-		if getattr(self, "_doc_before_save", None):
+		if not getattr(self.flags, "force_push", False) and getattr(self, "_doc_before_save", None):
 			record_data_before_save = self._doc_before_save.to_dict()
 			record_before_save = self.deserialize_attributes_of_type_dict_or_list(record_data_before_save)
 			if self.field_setter_map:
 				for new_key, old_key in self.field_setter_map.items():
-					record_before_save[old_key] = record_before_save[new_key]
+					record_before_save[old_key] = record_before_save.get(new_key)
 			keys_to_pop = [
 				key
 				for key, value in record.items()
@@ -388,6 +456,11 @@ class WooCommerceResource(Document):
 			]
 			for key in keys_to_pop:
 				record.pop(key)
+
+		# If all fields were unchanged, skip making a redundant PUT call
+		if not record:
+			self.after_db_update()
+			return
 
 		# Parse the server domain and id from the Document name
 		if self.name and WC_RESOURCE_DELIMITER in str(self.name):
@@ -422,9 +495,57 @@ class WooCommerceResource(Document):
 		except Exception as err:
 			log_and_raise_error(err, error_text="db_update failed")
 		if response.status_code != 200:
-			log_and_raise_error(error_text="db_update failed", response=response)
+			# Check if WooCommerce rejected the update due to an invalid/deleted attachment image ID
+			if response.status_code == 400 and "images" in record:
+				retry_count = 0
+				while response.status_code == 400 and retry_count < 3 and "images" in record:
+					try:
+						res_json = response.json()
+						if res_json.get("code") == "woocommerce_product_invalid_image_id":
+							import re
+							invalid_match = re.search(r"#(\d+) is an invalid image ID", res_json.get("message", ""))
+							invalid_id = invalid_match.group(1) if invalid_match else None
+							if isinstance(record.get("images"), list):
+								if invalid_id:
+									record["images"] = [
+										img for img in record["images"]
+										if not (isinstance(img, dict) and str(img.get("id")) == invalid_id)
+									]
+								else:
+									record["images"] = []
+							else:
+								record.pop("images", None)
+
+							if invalid_id:
+								frappe.db.sql(
+									"""
+									UPDATE `tabItem WooCommerce Server`
+									SET woocommerce_image_id = NULL, woocommerce_last_image_url = NULL, woocommerce_image_hash = NULL
+									WHERE woocommerce_image_id = %s
+									""",
+									(str(invalid_id),),
+								)
+								frappe.db.commit()
+
+							frappe.logger("woocommerce_fusion").warning(
+								f"Removed invalid image ID {invalid_id} for {self.resource} #{id} and retrying db_update (attempt {retry_count + 1})"
+							)
+							response = self.current_wc_api.api.put(endpoint, data=record)
+							retry_count += 1
+						else:
+							break
+					except Exception as img_retry_err:
+						frappe.logger("woocommerce_fusion").warning(f"Image ID retry failed: {img_retry_err}")
+						break
+
+			if response.status_code != 200:
+				log_and_raise_error(error_text="db_update failed", response=response)
 
 		self.woocommerce_date_modified = response.json()["date_modified"]
+		try:
+			self._doc_before_save = frappe.copy_doc(self)
+		except Exception:
+			pass
 		self.after_db_update()
 
 	@classmethod
