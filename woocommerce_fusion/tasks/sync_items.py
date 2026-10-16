@@ -1,6 +1,8 @@
-import urllib.parse
 import json
+import os
+import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
@@ -473,14 +475,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			item.item.flags.in_sync = True
 			item.item.flags.ignore_mandatory = True
 			try:
-				item.item.save()
+				item.item.save(ignore_permissions=True)
 			except frappe.exceptions.TimestampMismatchError:
 				item.item.reload()
 				fields_updated, item.item = self.set_item_fields(item=item.item)
 				item.item.flags.created_by_sync = True
 				item.item.flags.in_sync = True
 				item.item.flags.ignore_mandatory = True
-				item.item.save()
+				item.item.save(ignore_permissions=True)
 
 		self.set_sync_hash()
 
@@ -652,16 +654,17 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			item.item.flags.created_by_sync = True
 			item.item.flags.in_sync = True
 			try:
-				item.item.save()
+				item.item.save(ignore_permissions=True)
 			except frappe.exceptions.TimestampMismatchError:
 				item.item.reload()
 				item.item_woocommerce_server.woocommerce_id = str(wc_product.woocommerce_id)
 				item.item.flags.created_by_sync = True
 				item.item.flags.in_sync = True
-				item.item.save()
+				item.item.save(ignore_permissions=True)
 
 			# Upload image to WooCommerce after product is created (woocommerce_id is now available)
 			if self._sync_item_image_to_woocommerce(wc_product, item):
+				wc_product.flags.ignore_version = True
 				wc_product.save()
 
 			self.set_sync_hash()
@@ -724,7 +727,7 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		item.flags.created_by_sync = True
 		item.flags.in_sync = True
 
-		item.insert()
+		item.insert(ignore_permissions=True)
 
 		self.item = ERPNextItemToSync(
 			item=item,
@@ -872,15 +875,82 @@ class SynchroniseItem(SynchroniseWooCommerce):
 		if not item.item.image:
 			return False
 
-		image_details = frappe.db.get_value(
+		file_fields = ["name", "file_name", "file_url", "is_private", "content_hash", "modified"]
+		file_row = frappe.db.get_value(
 			"File",
-			{"file_url": item.item.image},
-			["file_name", "file_url", "is_private", "content_hash", "modified"],
+			{
+				"file_url": item.item.image,
+				"attached_to_doctype": "Item",
+				"attached_to_name": item.item.name,
+			},
+			file_fields,
+			as_dict=True,
 		)
-		if not image_details:
+		if not file_row:
+			file_row = frappe.db.get_value(
+				"File",
+				{"file_url": item.item.image},
+				file_fields,
+				as_dict=True,
+			)
+		if not file_row:
+			# Fallback: find latest image file attached directly to this Item
+			attached_files = frappe.get_all(
+				"File",
+				filters={
+					"attached_to_doctype": "Item",
+					"attached_to_name": item.item.name,
+					"is_folder": 0,
+				},
+				fields=file_fields,
+				order_by="creation desc",
+				limit=5,
+			)
+			for cand in attached_files:
+				if cand.file_url and cand.file_url.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+					file_row = cand
+					if item.item.image != cand.file_url:
+						item.item.image = cand.file_url
+						frappe.db.set_value("Item", item.item.name, "image", cand.file_url, update_modified=False)
+					break
+
+		if file_row:
+			# Auto-convert private item images to public so WooCommerce can fetch them
+			if file_row.is_private == 1 and file_row.name:
+				try:
+					file_doc = frappe.get_doc("File", file_row.name)
+					file_doc.is_private = 0
+					file_doc.save(ignore_permissions=True)
+					file_row.file_url = file_doc.file_url
+					file_row.is_private = 0
+					if item.item.image != file_doc.file_url:
+						item.item.image = file_doc.file_url
+						frappe.db.set_value("Item", item.item.name, "image", file_doc.file_url, update_modified=False)
+				except Exception as priv_err:
+					frappe.logger("woocommerce_fusion").warning(
+						f"Could not convert private image {file_row.file_url} to public for Item {item.item.name}: {priv_err}"
+					)
+
+			file_name = file_row.file_name
+			file_url = file_row.file_url
+			is_private = file_row.is_private
+			content_hash = file_row.content_hash
+			modified = file_row.modified
+		elif item.item.image.startswith(("/files/", "http://", "https://")):
+			file_url = item.item.image
+			file_name = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(file_url).path)) or f"{item.item.name}.jpg"
+			is_private = 0
+			content_hash = None
+			modified = None
+		else:
 			return False
 
-		file_name, file_url, is_private, content_hash, modified = image_details
+		# Prefer the actual filename from file_url over potentially collided tabFile.file_name
+		url_basename = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(file_url).path))
+		if url_basename and "." in url_basename:
+			file_name = url_basename
+
+		image_details = (file_name, file_url, is_private, content_hash, modified)
 		image_url = format_erpnext_img_url(image_details)
 		if not image_url:
 			return False
@@ -894,12 +964,11 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			image_unchanged = False
 			if last_image_hash and content_hash and str(last_image_hash) == str(content_hash):
 				image_unchanged = True
-			elif not last_image_hash and last_image_url and last_image_url == image_url:
+			elif not last_image_hash and last_image_url and urllib.parse.unquote(str(last_image_url)) == urllib.parse.unquote(str(image_url)):
 				image_unchanged = True
 
 			if image_unchanged:
-				# Ensure that the existing image is actually assigned to the WooCommerce product.
-				# If WooCommerce product has no image or lost its featured image, re-assign current_image_id.
+				# Ensure that the existing image is actually assigned as the primary featured image on WooCommerce.
 				current_int_id = safe_int(current_image_id)
 				wc_images = getattr(wc_product, "images", None)
 				if isinstance(wc_images, str) and wc_images:
@@ -909,11 +978,14 @@ class SynchroniseItem(SynchroniseWooCommerce):
 						wc_images = []
 
 				has_image_assigned = False
-				if isinstance(wc_images, list):
-					for img in wc_images:
-						if isinstance(img, dict) and safe_int(img.get("id")) == current_int_id:
-							has_image_assigned = True
-							break
+				if isinstance(wc_images, list) and len(wc_images) > 0:
+					first_wc_img = wc_images[0]
+					if (
+						isinstance(first_wc_img, dict)
+						and safe_int(first_wc_img.get("id")) == current_int_id
+						and first_wc_img.get("src")
+					):
+						has_image_assigned = True
 
 				if has_image_assigned:
 					return False
@@ -925,18 +997,29 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				return False
 
 		# 2. Attachment Discovery: If ERPNext has no image_id recorded yet, check if
-		# WooCommerce product already has an image attached with matching name or file
+		# WooCommerce product already has an image attached with an exact normalized filename match
 		if not current_image_id and wc_product.images:
 			existing_wc_images = json.loads(wc_product.images) if isinstance(wc_product.images, str) else wc_product.images
 			if existing_wc_images and isinstance(existing_wc_images, list) and len(existing_wc_images) > 0:
 				first_img = existing_wc_images[0]
 				first_img_id = safe_int(first_img.get("id")) if isinstance(first_img, dict) else None
 				if first_img_id:
-					wc_img_name = str(first_img.get("name", "")).lower()
-					wc_img_src = str(first_img.get("src", "")).lower()
+					wc_img_src = str(first_img.get("src", ""))
+					wc_src_base = os.path.basename(urllib.parse.unquote(urllib.parse.urlparse(wc_img_src).path)).rsplit(".", 1)[0].lower()
+					wc_src_base = re.sub(r"-(?:scaled|\d+)$", "", wc_src_base)
+					wc_norm = re.sub(r"[^a-z0-9]+", "-", wc_src_base).strip("-")
+
 					clean_file_base = file_name.rsplit(".", 1)[0].lower()
-					if clean_file_base in wc_img_name or clean_file_base in wc_img_src:
-						# Same image already on WooCommerce: adopt existing ID
+					erp_norm = re.sub(r"[^a-z0-9]+", "-", clean_file_base).strip("-")
+
+					generic_names = {"s-l1600", "s-l960", "s-l500", "s-l400", "s-l300", "download", "image", "images", "unnamed", "untitled"}
+					if (
+						erp_norm
+						and len(erp_norm) >= 5
+						and erp_norm not in generic_names
+						and not erp_norm.startswith("whatsapp-image")
+						and erp_norm == wc_norm
+					):
 						existing_id = first_img_id
 						self._update_item_wc_image_meta(
 							item.item_woocommerce_server.name,
@@ -946,8 +1029,8 @@ class SynchroniseItem(SynchroniseWooCommerce):
 						)
 						return False
 					else:
-						# Different image: mark existing ID as old_image_id for safe cleanup
-						current_image_id = str(first_img["id"])
+						# Different or unverified image: mark existing ID as old_image_id for safe cleanup
+						current_image_id = str(first_img_id)
 
 		# 3. Upload or update image via woo-media-api with content hash
 		media_response = self.handle_media_update(

@@ -449,9 +449,11 @@ class WooCommerceResource(Document):
 		if not getattr(self.flags, "force_push", False) and getattr(self, "_doc_before_save", None):
 			record_data_before_save = self._doc_before_save.to_dict()
 			record_before_save = self.deserialize_attributes_of_type_dict_or_list(record_data_before_save)
+			record_before_save = self.before_db_update(record_before_save)
 			if self.field_setter_map:
 				for new_key, old_key in self.field_setter_map.items():
-					record_before_save[old_key] = record_before_save.get(new_key)
+					if new_key in record_before_save:
+						record_before_save[old_key] = record_before_save.get(new_key)
 			keys_to_pop = [
 				key
 				for key, value in record.items()
