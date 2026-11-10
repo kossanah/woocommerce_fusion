@@ -234,7 +234,7 @@ def update_stock_levels_for_items(item_codes):
 
 		for item in items_to_sync:
 			stock_qty = get_stock_qty(item.item_code)
-			update_payload = {"id": item.woocommerce_id, "stock_quantity": stock_qty}
+			update_payload = {"id": item.woocommerce_id, "manage_stock": True, "stock_quantity": stock_qty}
 
 			if item.variant_of:
 				parent_id = get_parent_id(item)

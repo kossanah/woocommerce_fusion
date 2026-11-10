@@ -652,6 +652,10 @@ class SynchroniseSalesOrder(SynchroniseWooCommerce):
 		"""
 		Searching for items linked to multiple WooCommerce sites
 		"""
+		wc_server = frappe.get_cached_doc("WooCommerce Server", woocommerce_site)
+		if not getattr(wc_server, "create_items_in_erpnext", False):
+			return
+
 		for item_data in items_list:
 			item_woo_com_id = cstr(item_data.get("variation_id") or item_data.get("product_id"))
 

@@ -431,8 +431,16 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			# create missing product in WooCommerce
 			self.create_woocommerce_product(self.item)
 		elif self.woocommerce_product and not self.item:
-			# create missing item in ERPNext
-			self.create_item(self.woocommerce_product)
+			# ERPNext is the single source of truth: only create item in ERPNext if explicitly enabled on server
+			wc_server = frappe.get_cached_doc("WooCommerce Server", self.woocommerce_product.woocommerce_server)
+			if getattr(wc_server, "create_items_in_erpnext", False):
+				self.create_item(self.woocommerce_product)
+			else:
+				frappe.logger("woocommerce_fusion").info(
+					f"Skipping ERPNext item creation for WooCommerce Product {self.woocommerce_product.name}: "
+					f"ERPNext is single source of truth."
+				)
+				return
 		elif self.item and self.woocommerce_product:
 			if getattr(self, "force_push", False):
 				self.update_woocommerce_product(self.woocommerce_product, self.item)
@@ -625,6 +633,10 @@ class SynchroniseItem(SynchroniseWooCommerce):
 			wc_product.woocommerce_name = item.item.item_name
 			wc_product.regular_price = get_item_price_rate(item) or "0"
 			wc_product.sku = item.item.item_code
+			if wc_product.type != "variable":
+				wc_product.manage_stock = True
+			else:
+				wc_product.manage_stock = False
 
 			wc_server = frappe.get_cached_doc(
 				"WooCommerce Server", item.item_woocommerce_server.woocommerce_server

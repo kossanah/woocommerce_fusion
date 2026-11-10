@@ -151,6 +151,10 @@ class WooCommerceProduct(WooCommerceResource):
 		"""
 		Perform some tasks to make sure that a product is in the correct format for the WC API
 		"""
+		# Manage stock boolean
+		if "manage_stock" in product and product.get("manage_stock") is not None:
+			product["manage_stock"] = bool(product["manage_stock"])
+
 		# Convert back to string
 		if product.get("weight") is not None:
 			product["weight"] = str(product["weight"])

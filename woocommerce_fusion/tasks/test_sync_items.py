@@ -100,17 +100,22 @@ class TestWooCommerceSync(FrappeTestCase):
 		# Assert that the item need to be updated
 		mock_update_woocommerce_product.assert_called_once_with(wc_product, sync.item)
 
+	@patch("frappe.get_cached_doc")
 	@patch("woocommerce_fusion.tasks.sync.frappe")
 	@patch.object(SynchroniseItem, "create_item")
 	def test_sync_items_while_passing_item_should_create_item_if_no_item(
-		self, mock_create_item, mock_frappe, mock_set_sync_hash, mock_run_item_sync
+		self, mock_create_item, mock_frappe, mock_get_cached_doc, mock_set_sync_hash, mock_run_item_sync
 	):
 		"""
 		Test that the 'sync_items' function should create a Item if
-		there are no corresponding Items
+		there are no corresponding Items and create_items_in_erpnext is enabled
 		"""
 		# Initialise class
 		sync = SynchroniseItem(servers=Mock())
+
+		mock_wc_server = Mock()
+		mock_wc_server.create_items_in_erpnext = True
+		mock_get_cached_doc.return_value = mock_wc_server
 
 		mock_frappe.get_doc.return_value = Mock()
 		mock_frappe.get_single.return_value = Mock()
@@ -280,6 +285,7 @@ class TestWooCommerceSync(FrappeTestCase):
 		self.assertEqual(wc_product_mock.woocommerce_name, item_mock.item.item_name)
 		self.assertEqual(wc_product_mock.type, "simple")
 		self.assertEqual(wc_product_mock.regular_price, "100.00")
+		self.assertEqual(wc_product_mock.manage_stock, True)
 
 		self.assertEqual(item_woocommerce_server_mock.woocommerce_id, wc_product_mock.woocommerce_id)
 		item_mock.item.save.assert_called_once()
