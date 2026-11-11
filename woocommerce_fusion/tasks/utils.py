@@ -10,6 +10,11 @@ from woocommerce import API
 class APIWithRequestLogging(API):
 	"""WooCommerce API with Request Logging."""
 
+	def __init__(self, *args, **kwargs):
+		if "user_agent" not in kwargs:
+			kwargs["user_agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+		super().__init__(*args, **kwargs)
+
 	def _API__request(self, method, endpoint, data, params=None, **kwargs):
 		"""Override _request method to also create a 'WooCommerce Request Log'"""
 		result = None
