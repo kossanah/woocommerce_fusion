@@ -818,6 +818,9 @@ class SynchroniseItem(SynchroniseWooCommerce):
 					)
 				)
 				for map in wc_server.item_field_map:
+					if getattr(map, "sync_direction", "Bidirectional") == "ERPNext to WooCommerce":
+						continue
+
 					erpnext_item_field_name = map.erpnext_field_name.split(" | ")
 
 					jsonpath_expr = parse(map.woocommerce_field_name)
@@ -847,6 +850,9 @@ class SynchroniseItem(SynchroniseWooCommerce):
 				)
 
 				for map in wc_server.item_field_map:
+					if getattr(map, "sync_direction", "Bidirectional") == "WooCommerce to ERPNext":
+						continue
+
 					erpnext_item_field_name = map.erpnext_field_name.split(" | ")
 					erpnext_item_field_value = getattr(item.item, erpnext_item_field_name[0])
 

@@ -30,6 +30,15 @@
    "in_list_view": 1,
    "label": "JSONPath on WooCommerce Product",
    "reqd": 1
+  },
+  {
+   "fieldname": "sync_direction",
+   "fieldtype": "Select",
+   "label": "Sync Direction",
+   "options": "Bidirectional\nERPNext to WooCommerce\nWooCommerce to ERPNext",
+   "default": "Bidirectional",
+   "in_list_view": 1,
+   "reqd": 1
   }
  ],
  "index_web_pages_for_search": 1,
